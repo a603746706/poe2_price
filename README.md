@@ -1,10 +1,11 @@
-# POE2 物价补丁
+<img width="1280" height="775" alt="91f60c94d9b1e7f7f9483bbb3e6d45d9_720" src="https://github.com/user-attachments/assets/106bd6d6-00ce-4ef5-8620-c3f9086ded00" /># POE2 物价补丁
 
 这是一个给《Path of Exile 2》国际服/繁中客户端使用的物品名物价补丁工具。
 
 程序会读取游戏 `Content.ggpk` 里的物品名表，联网抓取 poe2scout 价格，把价格标记追加到物品名中，并提供一键还原。
 
 > 重要提醒：本工具会修改游戏文件，存在封号风险。使用前请确认自己能接受风险，并关闭游戏后再运行。
+<img width="1280" height="775" alt="91f60c94d9b1e7f7f9483bbb3e6d45d9_720" src="https://github.com/user-attachments/assets/279b1979-4ca3-4c38-bc68-4a8bdcf8a2a2" />
 
 ## 使用方法
 
