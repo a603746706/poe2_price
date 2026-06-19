@@ -231,7 +231,6 @@ function Test-RestoreZipUsable {
         if ($null -eq $Entry -or $Entry.Length -le 1048576) {
             return $false
         }
-
         $TempDat = Join-Path $env:TEMP ([string]::Concat("poe2_restore_validate_", [Guid]::NewGuid().ToString("N"), ".datc64"))
         try {
             [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $TempDat, $true)
@@ -467,19 +466,7 @@ function Update-IntlRestoreZipFromExtractedBaseItems {
         return $ZipPath
     }
 
-    $EntryNames = @(
-        "data/balance/baseitemtypes.datc64",
-        "data/balance/traditional chinese/baseitemtypes.datc64",
-        "data/balance/simplified chinese/baseitemtypes.datc64",
-        "data/balance/japanese/baseitemtypes.datc64",
-        "data/balance/korean/baseitemtypes.datc64",
-        "data/balance/russian/baseitemtypes.datc64",
-        "data/balance/french/baseitemtypes.datc64",
-        "data/balance/german/baseitemtypes.datc64",
-        "data/balance/spanish/baseitemtypes.datc64",
-        "data/balance/portuguese/baseitemtypes.datc64",
-        "data/balance/thai/baseitemtypes.datc64"
-    )
+    $EntryNames = Get-Poe2KnownBaseItemsPaths
 
     $Updated = 0
     foreach ($EntryName in $EntryNames) {
@@ -493,6 +480,13 @@ function Update-IntlRestoreZipFromExtractedBaseItems {
         }
         Update-RestoreZipEntry -ZipPath $ZipPath -SourceDat $ExtractedDat -EntryName $EntryName
         $Updated += 1
+
+        $WordsEntryName = Get-Poe2WordsPathFromBaseItemsPath -BaseItemsPath $EntryName
+        $ExtractedWords = Get-ExtractedBaseItemsPathForEntry $WordsEntryName
+        if (Test-Path -LiteralPath $ExtractedWords -PathType Leaf) {
+            Update-ZipEntryFromFile -ZipPath $ZipPath -SourceDat $ExtractedWords -EntryName $WordsEntryName
+            $Updated += 1
+        }
     }
 
     if ($Updated -gt 0) {
@@ -521,6 +515,7 @@ function New-BaseItemZipFromPhysicalRestore {
 
             $TempIndex = Join-Path $TempDir "Bundles2\_.index.bin"
             $TempDat = Join-Path $TempDir "BaseItemTypes.datc64"
+            $TempWords = Join-Path $TempDir "Words.datc64"
             Assert-File $TempIndex "physical restore Bundles2 _.index.bin"
             Resolve-BundleExtractor
 
@@ -535,7 +530,15 @@ function New-BaseItemZipFromPhysicalRestore {
                 continue
             }
 
-            New-BaseItemZip -SourceDat $TempDat -OutputZip $OutputZip
+            if ($SupportsUniqueWords) {
+                & $BundledBundleExtractorExe $TempIndex $TcWordsPath $TempWords
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warning "Ignore physical restore zip, Words extraction failed: $Candidate"
+                    continue
+                }
+            }
+
+            New-BaseItemZip -SourceDat $TempDat -SourceWords $TempWords -OutputZip $OutputZip
             return (Resolve-Path -LiteralPath $OutputZip).Path
         }
         finally {
@@ -775,10 +778,10 @@ $ExtractLog = Join-Path $RepoRoot "output\dat_files_latest_extract.log"
 $EnBaseItems = Join-Path $LatestDir "data\data_balance_baseitemtypes.datc64"
 $TcBaseItems = Join-Path $LatestDir ("data\" + $InstallInfo.LanguageFileSlug)
 $EnWords = Join-Path $LatestDir "data\data_balance_words.datc64"
-$TcWordsPath = $InstallInfo.TcBaseItemsPath -replace 'baseitemtypes\.datc64$', 'words.datc64'
-$TcWords = Join-Path $LatestDir ("data\" + ($TcWordsPath -replace '/', '_'))
+$TcWordsPath = $InstallInfo.TcWordsPath
+$TcWords = Join-Path $LatestDir ("data\" + $InstallInfo.WordsFileSlug)
 $UniqueGoldPrices = Join-Path $LatestDir "data\data_balance_uniquegoldprices.datc64"
-$SupportsUniqueWords = $TcWordsPath -in @("data/balance/words.datc64", "data/balance/traditional chinese/words.datc64")
+$SupportsUniqueWords = Test-Poe2UniqueWordsSupported -WordsPath $TcWordsPath
 $OutDir = Join-Path $RepoRoot "output\poe2_price_patch_latest"
 $RestoreOutDir = Join-Path $RepoRoot "output\restore"
 $RestoreZipName = Get-Poe2FixedRestorePatchZipName -InstallInfo $InstallInfo
@@ -912,7 +915,7 @@ if ($SupportsUniqueWords -and -not $CanPatchUniqueWords) {
     Write-Warning "Unique item price labels disabled: Words or UniqueGoldPrices datc64 files were not extracted."
 }
 elseif (-not $SupportsUniqueWords) {
-    Write-Warning "Unique item price labels disabled: only English and Traditional Chinese are supported for Words patching."
+    Write-Warning "Unique item price labels disabled: current language does not have a supported Words.datc64 path."
 }
 $RestoreZip = Ensure-RestoreZip $TcBaseItems
 if ($GameMode -eq "GGPK" -and -not (Test-BaseItemsLookPatched $TcBaseItems)) {

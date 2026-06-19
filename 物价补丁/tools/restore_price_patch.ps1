@@ -530,8 +530,8 @@ $PhysicalRestoreOutZip = Join-Path $RestoreOutDir $PhysicalRestoreZipName
 $PatchFolderRestoreZip = Join-Path $RepoRoot $RestoreZipName
 $PatchFolderPhysicalRestoreZip = Join-Path $RepoRoot $PhysicalRestoreZipName
 $CleanDat = Join-Path $RepoRoot ("output\dat_files_latest\data\" + $InstallInfo.LanguageFileSlug)
-$TcWordsPath = $InstallInfo.TcBaseItemsPath -replace 'baseitemtypes\.datc64$', 'words.datc64'
-$SupportsUniqueWords = $TcWordsPath -in @("data/balance/words.datc64", "data/balance/traditional chinese/words.datc64")
+$TcWordsPath = $InstallInfo.TcWordsPath
+$SupportsUniqueWords = Test-Poe2UniqueWordsSupported -WordsPath $TcWordsPath
 
 Write-Host "POE2 price patch restore" -ForegroundColor Green
 Write-Host "Game dir : $Poe2Dir"

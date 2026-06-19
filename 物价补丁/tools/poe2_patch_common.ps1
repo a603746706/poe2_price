@@ -290,6 +290,38 @@ function Get-Poe2ConfigLanguage {
     return $null
 }
 
+function Get-Poe2WordsPathFromBaseItemsPath {
+    param([Parameter(Mandatory = $true)][string]$BaseItemsPath)
+
+    if ($BaseItemsPath -notmatch 'baseitemtypes\.datc64$') {
+        throw "Cannot derive Words path from BaseItemTypes path: $BaseItemsPath"
+    }
+
+    return ($BaseItemsPath -replace 'baseitemtypes\.datc64$', 'words.datc64')
+}
+
+function Get-Poe2KnownBaseItemsPaths {
+    return @(
+        "data/balance/baseitemtypes.datc64",
+        "data/balance/traditional chinese/baseitemtypes.datc64",
+        "data/balance/simplified chinese/baseitemtypes.datc64",
+        "data/balance/japanese/baseitemtypes.datc64",
+        "data/balance/korean/baseitemtypes.datc64",
+        "data/balance/russian/baseitemtypes.datc64",
+        "data/balance/french/baseitemtypes.datc64",
+        "data/balance/german/baseitemtypes.datc64",
+        "data/balance/spanish/baseitemtypes.datc64",
+        "data/balance/portuguese/baseitemtypes.datc64",
+        "data/balance/thai/baseitemtypes.datc64"
+    )
+}
+
+function Test-Poe2UniqueWordsSupported {
+    param([Parameter(Mandatory = $true)][string]$WordsPath)
+
+    return ($WordsPath -match '(^|/)words\.datc64$')
+}
+
 function Get-Poe2InstallInfo {
     param([Parameter(Mandatory = $true)][string]$Poe2Dir)
 
@@ -326,8 +358,10 @@ function Get-Poe2InstallInfo {
         ConfigLanguage   = $(if ($LanguageDefaulted -or [string]::IsNullOrWhiteSpace($ConfigLanguage)) { $LanguageInfo.Code } else { $ConfigLanguage })
         EnBaseItemsPath  = "data/balance/baseitemtypes.datc64"
         TcBaseItemsPath  = $LanguagePath
+        TcWordsPath      = (Get-Poe2WordsPathFromBaseItemsPath -BaseItemsPath $LanguagePath)
         LanguageName     = $LanguageName
         LanguageFileSlug = ($LanguagePath -replace '/', '_')
+        WordsFileSlug    = ((Get-Poe2WordsPathFromBaseItemsPath -BaseItemsPath $LanguagePath) -replace '/', '_')
         LanguageDefaulted = $LanguageDefaulted
         LanguageDefaultReason = $LanguageDefaultReason
     }

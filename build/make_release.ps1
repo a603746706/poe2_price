@@ -145,18 +145,29 @@ function Resolve-FirstExistingFile {
 function Copy-IntlRestorePackage {
     param([Parameter(Mandatory = $true)][string]$Destination)
 
-    $BaseItemEntryNames = @(
+    $RestoreEntryNames = @(
         "data/balance/baseitemtypes.datc64",
+        "data/balance/words.datc64",
         "data/balance/traditional chinese/baseitemtypes.datc64",
+        "data/balance/traditional chinese/words.datc64",
         "data/balance/simplified chinese/baseitemtypes.datc64",
+        "data/balance/simplified chinese/words.datc64",
         "data/balance/japanese/baseitemtypes.datc64",
+        "data/balance/japanese/words.datc64",
         "data/balance/korean/baseitemtypes.datc64",
+        "data/balance/korean/words.datc64",
         "data/balance/russian/baseitemtypes.datc64",
+        "data/balance/russian/words.datc64",
         "data/balance/french/baseitemtypes.datc64",
+        "data/balance/french/words.datc64",
         "data/balance/german/baseitemtypes.datc64",
+        "data/balance/german/words.datc64",
         "data/balance/spanish/baseitemtypes.datc64",
+        "data/balance/spanish/words.datc64",
         "data/balance/portuguese/baseitemtypes.datc64",
-        "data/balance/thai/baseitemtypes.datc64"
+        "data/balance/portuguese/words.datc64",
+        "data/balance/thai/baseitemtypes.datc64",
+        "data/balance/thai/words.datc64"
     )
     Copy-Item -LiteralPath $IntlRestoreSeed -Destination $Destination -Force
 
@@ -165,21 +176,27 @@ function Copy-IntlRestorePackage {
 
     $TargetArchive = [System.IO.Compression.ZipFile]::Open($Destination, [System.IO.Compression.ZipArchiveMode]::Update)
     try {
-        foreach ($BaseItemEntryName in $BaseItemEntryNames) {
-            $CacheName = $BaseItemEntryName.Replace("/", "_").Replace(" ", "-")
+        foreach ($RestoreEntryName in $RestoreEntryNames) {
+            $CacheName = $RestoreEntryName.Replace("/", "_").Replace(" ", "-")
             $CacheDat = Join-Path $RestoreBaseItemsCacheDir $CacheName
+            $MinLength = if ($RestoreEntryName.EndsWith("baseitemtypes.datc64", [System.StringComparison]::OrdinalIgnoreCase)) {
+                1048576
+            }
+            else {
+                1024
+            }
 
             $SourceEntry = $null
             $SourceArchive = $null
             if (Test-Path -LiteralPath $CacheDat -PathType Leaf) {
-                $OldEntry = $TargetArchive.GetEntry($BaseItemEntryName)
+                $OldEntry = $TargetArchive.GetEntry($RestoreEntryName)
                 if ($null -ne $OldEntry) {
                     $OldEntry.Delete()
                 }
                 [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
                     $TargetArchive,
                     $CacheDat,
-                    $BaseItemEntryName,
+                    $RestoreEntryName,
                     [System.IO.Compression.CompressionLevel]::Optimal
                 ) | Out-Null
                 continue
@@ -191,8 +208,8 @@ function Copy-IntlRestorePackage {
                 }
 
                 $Archive = [System.IO.Compression.ZipFile]::OpenRead($Candidate)
-                $Entry = $Archive.GetEntry($BaseItemEntryName)
-                if ($null -ne $Entry -and $Entry.Length -gt 1048576) {
+                $Entry = $Archive.GetEntry($RestoreEntryName)
+                if ($null -ne $Entry -and $Entry.Length -gt $MinLength) {
                     $SourceArchive = $Archive
                     $SourceEntry = $Entry
                     break
@@ -202,16 +219,16 @@ function Copy-IntlRestorePackage {
             }
 
             if ($null -eq $SourceEntry) {
-                throw "Missing clean BaseItemTypes restore entry: $BaseItemEntryName"
+                throw "Missing clean restore entry: $RestoreEntryName"
             }
 
             try {
-                $OldEntry = $TargetArchive.GetEntry($BaseItemEntryName)
+                $OldEntry = $TargetArchive.GetEntry($RestoreEntryName)
                 if ($null -ne $OldEntry) {
                     $OldEntry.Delete()
                 }
 
-                $NewEntry = $TargetArchive.CreateEntry($BaseItemEntryName, [System.IO.Compression.CompressionLevel]::Optimal)
+                $NewEntry = $TargetArchive.CreateEntry($RestoreEntryName, [System.IO.Compression.CompressionLevel]::Optimal)
                 $Input = $SourceEntry.Open()
                 $Output = $NewEntry.Open()
                 try {
