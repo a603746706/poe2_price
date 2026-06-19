@@ -504,7 +504,7 @@ def fetch_unique_category_items(
     api_base: str,
     league: str,
     category: str,
-    per_page: int = 50,
+    per_page: int = 100,
 ) -> list[dict[str, Any]]:
     query = urllib.parse.urlencode(
         {
