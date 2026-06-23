@@ -765,12 +765,13 @@ function New-BaseItemZipFromPhysicalRestore {
             $TempIndex = Join-Path $TempDir "Bundles2\_.index.bin"
             $TempDat = Join-Path $TempDir "BaseItemTypes.datc64"
             $TempWords = Join-Path $TempDir "Words.datc64"
+            $ExtractLog = Join-Path $TempDir "extract.log"
             Assert-File $TempIndex "physical restore Bundles2 _.index.bin"
             Resolve-BundleExtractor
 
-            & $BundledBundleExtractorExe $TempIndex $InstallInfo.TcBaseItemsPath $TempDat
+            & $BundledBundleExtractorExe $TempIndex $InstallInfo.TcBaseItemsPath $TempDat *> $ExtractLog
             if ($LASTEXITCODE -ne 0) {
-                Write-Warning "忽略真实还原包：提取 BaseItemTypes 失败。文件：$Candidate"
+                Write-Warning "忽略真实还原包：提取 BaseItemTypes 失败。文件：$Candidate；日志：$ExtractLog"
                 continue
             }
 
@@ -780,9 +781,9 @@ function New-BaseItemZipFromPhysicalRestore {
             }
 
             if ($SupportsUniqueWords) {
-                & $BundledBundleExtractorExe $TempIndex $TcWordsPath $TempWords
+                & $BundledBundleExtractorExe $TempIndex $TcWordsPath $TempWords *> $ExtractLog
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warning "忽略真实还原包：提取 Words 失败。文件：$Candidate"
+                    Write-Warning "忽略真实还原包：提取 Words 失败。文件：$Candidate；日志：$ExtractLog"
                     continue
                 }
                 if (Test-WordsLookPatched $TempWords) {
