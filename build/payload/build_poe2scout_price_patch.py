@@ -92,6 +92,8 @@ UNIQUE_GOLD_PRICES_ROW_SIZE = 20
 CN_DIVINE_NAMES = ("神圣石", "神圣宝珠", "Divine Orb")
 CN_EXALTED_NAMES = ("崇高石", "崇高宝珠", "Exalted Orb")
 CN_TRUSTED_BUY_SELL_RATIO = Decimal("5")
+CN_HIGH_VALUE_FALLBACK_THRESHOLD_DIVINE = Decimal("10")
+CN_HIGH_VALUE_FALLBACK_MAX_RATIO = Decimal("5")
 
 
 @dataclass(frozen=True)
@@ -892,6 +894,14 @@ def poecurrency_item_price(item: dict[str, Any]) -> tuple[Decimal, str]:
     )
 
 
+def poecurrency_divine_price(item: dict[str, Any]) -> tuple[Decimal, str]:
+    for field_name in ("latest_buy1", "buy_avg", "latest_sell1", "sell_avg"):
+        price = to_decimal(item.get(field_name))
+        if price > 0:
+            return price, f"{field_name}_divine_ratio"
+    return Decimal("0"), ""
+
+
 def collect_poecurrency_observations(
     summary: list[dict[str, Any]],
 ) -> dict[str, PriceObservation]:
@@ -907,10 +917,13 @@ def collect_poecurrency_observations(
             if not isinstance(item, dict):
                 continue
             name = str(item.get("item_name") or "").strip()
-            price, price_field = poecurrency_item_price(item)
+            api_id = poecurrency_api_id(name)
+            if api_id == "divine":
+                price, price_field = poecurrency_divine_price(item)
+            else:
+                price, price_field = poecurrency_item_price(item)
             if not name or price <= 0:
                 continue
-            api_id = poecurrency_api_id(name)
             obs = PriceObservation(
                 api_id=api_id,
                 en_name=name,
@@ -1206,6 +1219,67 @@ def merge_primary_with_fallback_rows(
     return sorted(merged.values(), key=lambda r: r["name"]), added
 
 
+def decimal_ratio(a: Decimal, b: Decimal) -> Decimal:
+    if a <= 0 or b <= 0:
+        return Decimal("0")
+    high = max(a, b)
+    low = min(a, b)
+    return high / low
+
+
+def cn_price_divine_value(row: dict[str, str], divine_exalted: Decimal) -> Decimal:
+    price_exalted = to_decimal(row.get("price_exalted"))
+    if price_exalted <= 0 or divine_exalted <= 0:
+        return Decimal("0")
+    return price_exalted / divine_exalted
+
+
+def apply_high_value_reference_rows(
+    primary: list[dict[str, str]],
+    fallback: list[dict[str, str]],
+    primary_divine_exalted: Decimal,
+    fallback_divine_exalted: Decimal,
+    min_divine: Decimal,
+    max_ratio: Decimal,
+) -> tuple[list[dict[str, str]], int]:
+    if min_divine <= 0 or max_ratio <= 0:
+        return primary, 0
+
+    fallback_by_metadata = {
+        row["metadata_path"]: row for row in fallback if row.get("metadata_path")
+    }
+    replaced = 0
+    checked: list[dict[str, str]] = []
+    for row in primary:
+        metadata_path = row.get("metadata_path", "")
+        fallback_row = fallback_by_metadata.get(metadata_path)
+        if not fallback_row:
+            checked.append(row)
+            continue
+
+        primary_divine = cn_price_divine_value(row, primary_divine_exalted)
+        fallback_divine = cn_price_divine_value(fallback_row, fallback_divine_exalted)
+        if (
+            fallback_divine < min_divine
+            or decimal_ratio(primary_divine, fallback_divine) <= max_ratio
+        ):
+            checked.append(row)
+            continue
+
+        replacement = dict(fallback_row)
+        replacement["source_pair"] = (
+            f"{fallback_row.get('source_pair', '')}; "
+            f"high_value_reference=poe2scout; "
+            f"cn_price={row.get('price', '')}; "
+            f"cn_price_exalted={row.get('price_exalted', '')}; "
+            f"cn_source={row.get('source_pair', '')}"
+        )
+        checked.append(replacement)
+        replaced += 1
+
+    return sorted(checked, key=lambda r: r["name"]), replaced
+
+
 def write_csv(path: Path, rows: list[dict[str, str]], fieldnames: list[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8-sig", newline="") as fh:
@@ -1269,6 +1343,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-uniques", action="store_true")
     parser.add_argument("--no-build-patch", action="store_true")
     parser.add_argument(
+        "--cn-high-value-fallback-threshold-divine",
+        type=Decimal,
+        default=CN_HIGH_VALUE_FALLBACK_THRESHOLD_DIVINE,
+        help=(
+            "For poecurrency-cn, compare items whose poe2scout reference is "
+            "at or above this Divine value and use poe2scout when the "
+            "deviation is too large."
+        ),
+    )
+    parser.add_argument(
+        "--cn-high-value-fallback-max-ratio",
+        type=Decimal,
+        default=CN_HIGH_VALUE_FALLBACK_MAX_RATIO,
+        help=(
+            "For poecurrency-cn high-value comparison, replace with poe2scout "
+            "when CN and poe2scout Divine prices differ by more than this ratio."
+        ),
+    )
+    parser.add_argument(
         "--unique-price-label-mode",
         choices=UNIQUE_PRICE_LABEL_MODES,
         default="markup",
@@ -1310,6 +1403,7 @@ def main(argv: list[str]) -> int:
     scout_fallback_prices: dict[str, PriceObservation] = {}
     fallback_unique_by_name: dict[str, PriceObservation] = {}
     fallback_rows_added = 0
+    high_value_reference_rows = 0
     fallback_unique_words_patched = 0
 
     if args.price_source == "poecurrency-cn":
@@ -1361,6 +1455,14 @@ def main(argv: list[str]) -> int:
             client=client,
             use_poe2db=args.poe2db_fallback,
             max_workers=max(1, args.max_workers),
+        )
+        rows, high_value_reference_rows = apply_high_value_reference_rows(
+            primary=rows,
+            fallback=fallback_rows,
+            primary_divine_exalted=divine_exalted,
+            fallback_divine_exalted=fallback_divine_exalted,
+            min_divine=args.cn_high_value_fallback_threshold_divine,
+            max_ratio=args.cn_high_value_fallback_max_ratio,
         )
         rows, fallback_rows_added = merge_primary_with_fallback_rows(
             rows, fallback_rows
@@ -1424,7 +1526,7 @@ def main(argv: list[str]) -> int:
     summary = {
         "price_source": args.price_source,
         "price_strategy": (
-            "poecurrency-cn latest buy/sell first, avg fallback; geo when spread <= 5x, lower side when spread > 5x"
+            "poecurrency-cn uses latest buy/sell first with avg fallback; Divine ratio uses Divine latest_buy1; high-value outliers are replaced by poe2scout when CN and poe2scout differ beyond threshold"
             if args.price_source == "poecurrency-cn"
             else "poe2scout relative price"
         ),
@@ -1441,6 +1543,13 @@ def main(argv: list[str]) -> int:
         "unique_words_clean_passthrough": False,
         "matched_items": len(rows),
         "fallback_matched_items": fallback_rows_added,
+        "high_value_reference_items": high_value_reference_rows,
+        "cn_high_value_fallback_threshold_divine": str(
+            args.cn_high_value_fallback_threshold_divine
+        ),
+        "cn_high_value_fallback_max_ratio": str(
+            args.cn_high_value_fallback_max_ratio
+        ),
         "missing_items": len(missing),
         "divine_price_exalted": str(divine_exalted),
         "divine_exalted_ratio": divine_exalted_ratio_summary(divine_exalted),
