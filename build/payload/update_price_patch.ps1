@@ -342,10 +342,9 @@ function Test-BaseItemsLookPatched {
                     return $false
                 }
                 return (
-                    $Name -match '=[0-9]+(?:\.[0-9]+)?[DE]$' -or
-                    $Name -match '^[0-9]+(?:\.[0-9]+)?[DE]$' -or
-                    $Name -match '^<1[DE]$' -or
-                    ($Name.Length -le 12 -and $Name -match '[0-9]+(?:\.[0-9]+)?[DE]$')
+                    $Name -match '=(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]$' -or
+                    $Name -match '^(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]$' -or
+                    ($Name.Length -le 12 -and $Name -match '(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]$')
                 )
             } | Select-Object -First 1)
     }
@@ -366,7 +365,7 @@ function Test-WordsLookPatched {
     try {
         $Bytes = [System.IO.File]::ReadAllBytes($SourceWords)
         $Text = [System.Text.Encoding]::Unicode.GetString($Bytes)
-        return [bool]($Text -match '(?:\r?\n\[[0-9]+(?:\.[0-9]+)?[DE]\]|<<\[[0-9]+(?:\.[0-9]+)?[DE]\]>>|\[[^\]\r\n|]*[0-9]+(?:\.[0-9]+)?[DE][^\]\r\n|]*\|[^\]\r\n]+\])')
+        return [bool]($Text -match '(?:\r?\n\[(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]\]|<<\[(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]\]>>|\[[^\]\r\n|]*(?:<1|[0-9]+(?:\.[0-9]+)?)[DE][^\]\r\n|]*\|[^\]\r\n]+\])')
     }
     catch {
         Write-Warning "检查 Words.datc64 是否已打补丁时失败：$($_.Exception.Message)"
@@ -930,6 +929,19 @@ function Ensure-PhysicalRestoreZip {
         return ""
     }
 
+    if (-not $SourceLooksPatched) {
+        Write-Host "正在用当前 Bundles2 状态刷新真实还原包..." -ForegroundColor Yellow
+        $Created = New-PhysicalRestoreZip -OutputZip $PhysicalRestoreOutZip
+        if ([string]::IsNullOrWhiteSpace($Created) -or -not (Test-PhysicalRestoreZipUsable $Created)) {
+            throw "创建真实还原包失败：$PhysicalRestoreOutZip"
+        }
+
+        if ($Created -ne $PhysicalRestorePatchFolderZip) {
+            Copy-Item -LiteralPath $Created -Destination $PhysicalRestorePatchFolderZip -Force
+        }
+        return (Resolve-Path -LiteralPath $PhysicalRestorePatchFolderZip).Path
+    }
+
     foreach ($Candidate in (Get-PhysicalRestoreZipCandidates)) {
         if (Test-PhysicalRestoreZipUsable $Candidate) {
             $ResolvedCandidate = (Resolve-Path -LiteralPath $Candidate).Path
@@ -941,20 +953,7 @@ function Ensure-PhysicalRestoreZip {
         }
     }
 
-    if ($SourceLooksPatched) {
-        throw "缺少真实还原包，而且当前 Bundles2 已经包含物价补丁标记。请先让 Steam/Epic/WeGame 验证或修复一次游戏文件，再从干净状态运行一键更新。"
-    }
-
-    Write-Host "正在从当前干净游戏文件创建真实 Bundles2 还原包..." -ForegroundColor Yellow
-    $Created = New-PhysicalRestoreZip -OutputZip $PhysicalRestoreOutZip
-    if ([string]::IsNullOrWhiteSpace($Created) -or -not (Test-PhysicalRestoreZipUsable $Created)) {
-        throw "创建真实还原包失败：$PhysicalRestoreOutZip"
-    }
-
-    if ($Created -ne $PhysicalRestorePatchFolderZip) {
-        Copy-Item -LiteralPath $Created -Destination $PhysicalRestorePatchFolderZip -Force
-    }
-    return (Resolve-Path -LiteralPath $PhysicalRestorePatchFolderZip).Path
+    throw "缺少真实还原包，而且当前 Bundles2 已经包含物价补丁标记。请先运行一键还原；如果没有真实还原包，请让 Steam/Epic/WeGame 验证或修复一次游戏文件后，先打需要共存的功能补丁，再运行一键更新。"
 }
 
 function Ensure-RestoreZip {
@@ -1230,19 +1229,28 @@ if ($GameMode -eq "GGPK" -and -not (Test-BaseItemsLookPatched $TcBaseItems)) {
     $RestoreZip = Update-IntlRestoreZipFromExtractedBaseItems -ZipPath $RestoreZip
 }
 $SourceBaseItemsLooksPatched = Test-BaseItemsLookPatched $TcBaseItems
-if ($SourceBaseItemsLooksPatched) {
+if ($SourceBaseItemsLooksPatched -and $GameMode -eq "GGPK") {
     Write-Host "当前 BaseItemTypes 已包含补丁标记，正在从固定还原包重建干净文件..." -ForegroundColor Yellow
     Extract-RestoreBaseItems -RestoreZip $RestoreZip -OutputDat $TcBaseItems
 }
-if ($SupportsUniqueWords -and (Test-WordsLookPatched $TcWords)) {
+$SourceWordsLooksPatched = $false
+if ($SupportsUniqueWords -and (Test-Path -LiteralPath $TcWords -PathType Leaf)) {
+    $SourceWordsLooksPatched = Test-WordsLookPatched $TcWords
+}
+if ($SourceBaseItemsLooksPatched -and $GameMode -eq "Bundles2") {
+    Write-Host "当前 BaseItemTypes 已包含物价标记，将保留当前 Bundles2 底板并只替换物价层。" -ForegroundColor Yellow
+}
+if ($SupportsUniqueWords -and $SourceWordsLooksPatched -and $GameMode -eq "GGPK") {
     Write-Host "当前 Words.datc64 已包含传奇价格标记，正在从固定还原包重建干净文件..." -ForegroundColor Yellow
     Extract-RestoreWords -RestoreZip $RestoreZip -OutputWords $TcWords
+}
+elseif ($SupportsUniqueWords -and $SourceWordsLooksPatched -and $GameMode -eq "Bundles2") {
+    Write-Host "当前 Words.datc64 已包含传奇价格标记，将在生成补丁时清理并重打。" -ForegroundColor Yellow
 }
 $CanPatchUniqueWords = (
     $SupportsUniqueWords -and
     (Test-Path -LiteralPath $EnWords -PathType Leaf) -and
     (Test-Path -LiteralPath $TcWords -PathType Leaf) -and
-    -not (Test-WordsLookPatched $TcWords) -and
     (Test-Path -LiteralPath $UniqueGoldPrices -PathType Leaf)
 )
 Compact-LatestBaseItems $LatestDir @($EnBaseItems, $TcBaseItems, $EnWords, $TcWords, $UniqueGoldPrices)
@@ -1250,7 +1258,7 @@ if (-not ([bool]$InstallInfo.IsChina -or [string]$InstallInfo.InstallKind -like 
     Copy-Item -LiteralPath $RestoreZip -Destination $RestorePatchFolderZip -Force
 }
 if ($GameMode -eq "Bundles2") {
-    $PhysicalRestoreZip = Ensure-PhysicalRestoreZip -SourceLooksPatched $SourceBaseItemsLooksPatched
+    $PhysicalRestoreZip = Ensure-PhysicalRestoreZip -SourceLooksPatched ($SourceBaseItemsLooksPatched -or $SourceWordsLooksPatched)
     Write-Host "真实还原包：" -ForegroundColor Green
     Write-Host "  $PhysicalRestoreZip"
 }

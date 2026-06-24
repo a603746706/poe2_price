@@ -197,6 +197,7 @@ def load_price_rows(path: Path) -> list[dict[str, str]]:
 
 
 _PRICE_RE = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)?)([A-Za-z]+)\s*$")
+_PATCHED_PRICE_TEXT_RE = r"(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]"
 
 
 def unique_texts(values: list[str]) -> list[str]:
@@ -235,6 +236,11 @@ def compact_price_variants(price: str) -> list[str]:
         variants.append(f"<1{unit}")
 
     return unique_texts(variants)
+
+
+def strip_existing_price_suffix(name: str, separator: str) -> str:
+    pattern = re.compile(rf"{re.escape(separator)}{_PATCHED_PRICE_TEXT_RE}$")
+    return pattern.sub("", name).strip()
 
 
 def fit_name_with_price(
@@ -286,7 +292,11 @@ def build_replacements(
     by_path = {entry.metadata_path.lower(): entry for entry in entries}
     by_name: dict[str, list[BaseItemName]] = {}
     for entry in entries:
-        by_name.setdefault(entry.name, []).append(entry)
+        lookup_names = [entry.name]
+        if keep_existing_price:
+            lookup_names.append(strip_existing_price_suffix(entry.name, separator))
+        for lookup_name in unique_texts(lookup_names):
+            by_name.setdefault(lookup_name, []).append(entry)
 
     replacements: list[NameReplacement] = []
     warnings: list[str] = []
@@ -330,13 +340,18 @@ def build_replacements(
             continue
 
         if patch_same_name_duplicates:
-            target_entries = by_name.get(entry.name, [entry])
+            duplicate_name = (
+                strip_existing_price_suffix(entry.name, separator)
+                if keep_existing_price
+                else entry.name
+            )
+            target_entries = by_name.get(duplicate_name, [entry])
         elif not target_entries:
             target_entries = [entry]
 
         old_name = entry.name
-        if keep_existing_price and separator in old_name:
-            old_name = old_name.split(separator, 1)[0]
+        if keep_existing_price:
+            old_name = strip_existing_price_suffix(old_name, separator)
         requested_name = new_name or f"{old_name}{separator}{price}"
 
         for target_entry in target_entries:
@@ -345,8 +360,10 @@ def build_replacements(
             seen_rows.add(target_entry.row_index)
 
             target_old_name = target_entry.name
-            if keep_existing_price and separator in target_old_name:
-                target_old_name = target_old_name.split(separator, 1)[0]
+            if keep_existing_price:
+                target_old_name = strip_existing_price_suffix(
+                    target_old_name, separator
+                )
             target_requested_name = new_name or f"{target_old_name}{separator}{price}"
             slot_chars = (target_entry.name_end - target_entry.name_start) // 2
             if mode == "append":
@@ -382,6 +399,29 @@ def build_replacements(
                     fitted_name=fitted_name,
                     metadata_path=target_entry.metadata_path,
                     price=price,
+                )
+            )
+
+    if keep_existing_price:
+        for entry in entries:
+            if entry.row_index in seen_rows:
+                continue
+            stripped_name = strip_existing_price_suffix(entry.name, separator)
+            if stripped_name == entry.name:
+                continue
+            seen_rows.add(entry.row_index)
+            replacements.append(
+                NameReplacement(
+                    row_index=entry.row_index,
+                    name_start=entry.name_start,
+                    name_end=entry.name_end,
+                    name_offset=entry.name_offset,
+                    name_pointer_pos=entry.name_pointer_pos,
+                    old_name=entry.name,
+                    requested_name=stripped_name,
+                    fitted_name=stripped_name,
+                    metadata_path=entry.metadata_path,
+                    price="",
                 )
             )
 

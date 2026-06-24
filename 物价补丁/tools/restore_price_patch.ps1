@@ -60,10 +60,9 @@ function Test-BaseItemsLookPatched {
                     return $false
                 }
                 return (
-                    $Name -match '=[0-9]+(?:\.[0-9]+)?[DE]$' -or
-                    $Name -match '^[0-9]+(?:\.[0-9]+)?[DE]$' -or
-                    $Name -match '^<1[DE]$' -or
-                    ($Name.Length -le 12 -and $Name -match '[0-9]+(?:\.[0-9]+)?[DE]$')
+                    $Name -match '=(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]$' -or
+                    $Name -match '^(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]$' -or
+                    ($Name.Length -le 12 -and $Name -match '(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]$')
                 )
             } | Select-Object -First 1)
     }

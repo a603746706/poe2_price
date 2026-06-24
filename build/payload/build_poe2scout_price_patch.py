@@ -72,7 +72,7 @@ DEFAULT_UNIQUE_GOLD_PRICES = (
     / "data_balance_uniquegoldprices.datc64"
 )
 DEFAULT_PATCH_SCRIPT = Path(__file__).with_name("poe2_name_price_patch.py")
-PRICE_TEXT_RE = r"[0-9]+(?:\.[0-9]+)?[DE]"
+PRICE_TEXT_RE = r"(?:<1|[0-9]+(?:\.[0-9]+)?)[DE]"
 UNIQUE_MARKUP_PRICE_RE = rf"\[[^\]\r\n|]*{PRICE_TEXT_RE}[^\]\r\n|]*\|[^\]\r\n]+\]"
 UNIQUE_PRICE_LABEL_MODES = ("markup", "overlay", "newline", "off")
 DISPLAY_NAME_FIELD_INDEX = 8
@@ -346,7 +346,7 @@ def strip_existing_price(name: str) -> str:
         return markup.group(1).strip()
     name = re.sub(rf"<<\[{PRICE_TEXT_RE}\]>>$", "", name)
     name = re.sub(rf"\s*\[{PRICE_TEXT_RE}\]$", "", name)
-    return re.sub(r"=[^\r\n]*$", "", name).strip()
+    return re.sub(rf"={PRICE_TEXT_RE}$", "", name).strip()
 
 
 def format_unique_price_name(base_name: str, price: str, label_mode: str) -> str:
@@ -357,6 +357,64 @@ def format_unique_price_name(base_name: str, price: str, label_mode: str) -> str
     if label_mode == "overlay":
         return f"{base_name}<<[{price}]>>"
     return base_name
+
+
+def set_words_display_name(
+    output: bytearray, layout: DatLayout, entry: WordEntry, text: str
+) -> None:
+    new_offset = append_utf16le_string(output, layout, text)
+    struct.pack_into("<I", output, entry.display_pointer_pos, new_offset)
+
+
+def clean_stale_unique_word_prices(
+    data: bytes,
+    layout: DatLayout,
+    output: bytearray,
+    unique_names: dict[str, UniqueName],
+    skip_rows: set[int] | None = None,
+) -> list[dict[str, str]]:
+    skip_rows = skip_rows or set()
+    cleaned: list[dict[str, str]] = []
+    for unique in sorted(unique_names.values(), key=lambda item: item.row_index):
+        if unique.row_index in skip_rows:
+            continue
+        entry = read_words_row(data, layout, unique.row_index)
+        if not entry:
+            continue
+        base_name = strip_existing_price(entry.display_name)
+        if base_name == entry.display_name:
+            continue
+        set_words_display_name(output, layout, entry, base_name)
+        cleaned.append(
+            {
+                "words_row_index": str(unique.row_index),
+                "en_name": unique.en_name,
+                "old_name": entry.display_name,
+                "new_name": base_name,
+                "price": "",
+                "api_id": "",
+                "price_exalted": "",
+                "source_pair": "existing-price-cleanup",
+                "status": "cleaned",
+                "reason": "removed stale unique price label",
+            }
+        )
+    return cleaned
+
+
+def clean_unique_word_prices_file(
+    tc_words_path: Path,
+    unique_names: dict[str, UniqueName],
+    patched_words: Path,
+) -> list[dict[str, str]]:
+    data = tc_words_path.read_bytes()
+    layout = detect_words_layout(data)
+    output = bytearray(data)
+    cleaned = clean_stale_unique_word_prices(data, layout, output, unique_names)
+    if cleaned:
+        patched_words.parent.mkdir(parents=True, exist_ok=True)
+        patched_words.write_bytes(bytes(output))
+    return cleaned
 
 
 def patch_unique_word_prices(
@@ -402,8 +460,7 @@ def patch_unique_word_prices(
             continue
         base_name = strip_existing_price(entry.display_name)
         new_name = format_unique_price_name(base_name, obs.display_price, label_mode)
-        new_offset = append_utf16le_string(output, layout, new_name)
-        struct.pack_into("<I", output, entry.display_pointer_pos, new_offset)
+        set_words_display_name(output, layout, entry, new_name)
         patched_rows.add(unique.row_index)
         patched.append(
             {
@@ -420,10 +477,13 @@ def patch_unique_word_prices(
             }
         )
 
-    if patched:
+    cleaned = clean_stale_unique_word_prices(
+        data, layout, output, unique_names, skip_rows=patched_rows
+    )
+    if patched or cleaned:
         patched_words.parent.mkdir(parents=True, exist_ok=True)
         patched_words.write_bytes(bytes(output))
-    return len(patched), patched, missing
+    return len(patched), patched + cleaned, missing
 
 
 def patch_unique_word_prices_with_cn_fallback(
@@ -442,11 +502,14 @@ def patch_unique_word_prices_with_cn_fallback(
     missing: list[dict[str, str]] = []
     fallback_count = 0
 
-    unique_entries = sorted(unique_names.values(), key=lambda item: item.display_name)
+    unique_entries = sorted(
+        unique_names.values(), key=lambda item: strip_existing_price(item.display_name)
+    )
     for unique in unique_entries:
         if unique.row_index in patched_rows:
             continue
-        obs = primary_prices.get(poecurrency_api_id(unique.display_name))
+        market_name = strip_existing_price(unique.display_name)
+        obs = primary_prices.get(poecurrency_api_id(market_name))
         source = "poecurrency-cn"
         if not obs or obs.price_exalted < Decimal("1") or not obs.display_price:
             obs = fallback_prices.get(f"unique:{normalize_name(unique.en_name)}")
@@ -454,7 +517,7 @@ def patch_unique_word_prices_with_cn_fallback(
         if not obs or obs.price_exalted < Decimal("1") or not obs.display_price:
             missing.append(
                 {
-                    "api_id": f"cn:{normalize_market_name(unique.display_name)}",
+                    "api_id": f"cn:{normalize_market_name(market_name)}",
                     "en_name": unique.en_name,
                     "reason": "not found in poecurrency-cn or poe2scout fallback",
                 }
@@ -473,8 +536,7 @@ def patch_unique_word_prices_with_cn_fallback(
             continue
         base_name = strip_existing_price(entry.display_name)
         new_name = format_unique_price_name(base_name, obs.display_price, label_mode)
-        new_offset = append_utf16le_string(output, layout, new_name)
-        struct.pack_into("<I", output, entry.display_pointer_pos, new_offset)
+        set_words_display_name(output, layout, entry, new_name)
         patched_rows.add(unique.row_index)
         if source == "poe2scout-fallback":
             fallback_count += 1
@@ -493,10 +555,13 @@ def patch_unique_word_prices_with_cn_fallback(
             }
         )
 
-    if patched:
+    cleaned = clean_stale_unique_word_prices(
+        data, layout, output, unique_names, skip_rows=patched_rows
+    )
+    if patched or cleaned:
         patched_words.parent.mkdir(parents=True, exist_ok=True)
         patched_words.write_bytes(bytes(output))
-    return len(patched), patched, missing, fallback_count
+    return len(patched), patched + cleaned, missing, fallback_count
 
 
 def list_unique_word_price_candidates(
@@ -1423,7 +1488,10 @@ def main(argv: list[str]) -> int:
                             patched_words=patched_words,
                             label_mode=args.unique_price_label_mode,
                         )
-                    if unique_words_patched:
+                    unique_words_dat_changed = unique_words_patched > 0 or any(
+                        row.get("status") == "cleaned" for row in unique_word_rows
+                    )
+                    if unique_words_dat_changed:
                         upsert_zip_entry(
                             output_zip,
                             words_game_path,
@@ -1437,22 +1505,31 @@ def main(argv: list[str]) -> int:
                         )
                         summary["unique_words_clean_passthrough"] = True
                 else:
-                    if words_look_price_patched(args.tc_words):
-                        raise ValueError(
-                            "target Words.datc64 still contains unique price labels; "
-                            "restore clean game data before building the PoE Overlay II compatible patch"
-                        )
                     unique_word_rows, unique_word_missing = list_unique_word_price_candidates(
                         unique_names=unique_names,
                         prices=best,
                         reason="unique Words price labels disabled by unique-price-label-mode=off",
                     )
-                    upsert_zip_entry(
-                        output_zip,
-                        words_game_path,
-                        args.tc_words.read_bytes(),
+                    patched_words = args.patched_words or (
+                        args.out_dir / "words.patched.datc64"
                     )
-                    summary["unique_words_clean_passthrough"] = True
+                    cleaned_rows = clean_unique_word_prices_file(
+                        args.tc_words, unique_names, patched_words
+                    )
+                    unique_word_rows.extend(cleaned_rows)
+                    if cleaned_rows:
+                        upsert_zip_entry(
+                            output_zip,
+                            words_game_path,
+                            patched_words.read_bytes(),
+                        )
+                    else:
+                        upsert_zip_entry(
+                            output_zip,
+                            words_game_path,
+                            args.tc_words.read_bytes(),
+                        )
+                        summary["unique_words_clean_passthrough"] = True
         elif not args.no_uniques:
             unique_word_missing.append(
                 {
