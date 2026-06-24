@@ -727,6 +727,77 @@ function Update-ZipEntryFromFile {
     }
 }
 
+function Merge-ExistingBundlePatchEntries {
+    param(
+        [Parameter(Mandatory = $true)][string]$ZipPath,
+        [Parameter(Mandatory = $true)][string[]]$ExcludeEntries
+    )
+
+    if ($GameMode -ne "Bundles2") {
+        return
+    }
+
+    $LibDir = Join-Path $Bundles2Paths.Bundles2Dir "LibGGPK3"
+    if (-not (Test-Path -LiteralPath $LibDir -PathType Container)) {
+        return
+    }
+
+    Resolve-BundleExtractor
+    $TempDir = Join-Path $env:TEMP ([string]::Concat("poe2_preserve_bundle_patch_", [Guid]::NewGuid().ToString("N")))
+    $ListPath = Join-Path $TempDir "libggpk3-files.tsv"
+    $ExtractLog = Join-Path $TempDir "extract.log"
+    $Exclude = @{}
+    foreach ($Entry in $ExcludeEntries) {
+        if (-not [string]::IsNullOrWhiteSpace($Entry)) {
+            $Exclude[$Entry.Replace("\", "/").ToLowerInvariant()] = $true
+        }
+    }
+
+    try {
+        New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
+        & $BundledBundleExtractorExe --list $Bundles2Paths.IndexBin $ListPath "LibGGPK3/" *> $ExtractLog
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $ListPath -PathType Leaf)) {
+            Write-Warning "列出现有 Bundles2 增量补丁失败，将只写入本次物价文件。日志：$ExtractLog"
+            return
+        }
+
+        $Rows = Import-Csv -LiteralPath $ListPath -Delimiter "`t" -Encoding UTF8
+        $Merged = 0
+        foreach ($Row in $Rows) {
+            $EntryName = ([string]$Row.path).Replace("\", "/")
+            if ([string]::IsNullOrWhiteSpace($EntryName)) {
+                continue
+            }
+            if ($Exclude.ContainsKey($EntryName.ToLowerInvariant())) {
+                continue
+            }
+            if (Test-ZipEntryExists -ZipPath $ZipPath -EntryName $EntryName) {
+                continue
+            }
+
+            $SafeName = $EntryName -replace '[\\/:*?"<>| ]', '_'
+            $OutFile = Join-Path $TempDir ([string]::Concat("entry_", $Merged, "_", $SafeName))
+            & $BundledBundleExtractorExe $Bundles2Paths.IndexBin $EntryName $OutFile *> $ExtractLog
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
+                Write-Warning "保留现有 Bundles2 增量文件失败，已跳过：$EntryName；日志：$ExtractLog"
+                continue
+            }
+
+            Update-ZipEntryFromFile -ZipPath $ZipPath -SourceDat $OutFile -EntryName $EntryName
+            $Merged += 1
+        }
+
+        if ($Merged -gt 0) {
+            Write-Host "已合并保留现有 Bundles2 增量补丁文件 $Merged 个。" -ForegroundColor Green
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $TempDir -PathType Container) {
+            Remove-Item -LiteralPath $TempDir -Recurse -Force
+        }
+    }
+}
+
 function Update-RestoreZipEntry {
     param(
         [string]$ZipPath,
@@ -1365,6 +1436,10 @@ if (-not $NoInstall) {
         }
 
         $TempPatchZip = $PatchZip
+        Merge-ExistingBundlePatchEntries -ZipPath $TempPatchZip -ExcludeEntries @(
+            $InstallInfo.TcBaseItemsPath,
+            $TcWordsPath
+        )
 
         if ($UsePatchBundleDll) {
             Write-Host "Bundle3 工具：$($BundledBundlePatchDll)"
