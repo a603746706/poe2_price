@@ -604,6 +604,49 @@ function Test-RestoreZipUsable {
     }
 }
 
+function Test-RestoreZipWordsUsable {
+    param([string]$Path)
+
+    if (-not $SupportsUniqueWords) {
+        return $true
+    }
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    try {
+        $Archive = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    }
+    catch {
+        return $false
+    }
+    try {
+        $Entry = $Archive.GetEntry($TcWordsPath)
+        if ($null -eq $Entry -or $Entry.Length -le 1024) {
+            return $false
+        }
+
+        $TempWords = Join-Path $env:TEMP ([string]::Concat("poe2_restore_words_validate_", [Guid]::NewGuid().ToString("N"), ".datc64"))
+        try {
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $TempWords, $true)
+            return -not (Test-WordsLookPatched $TempWords)
+        }
+        catch {
+            return $false
+        }
+        finally {
+            if (Test-Path -LiteralPath $TempWords -PathType Leaf) {
+                Remove-Item -LiteralPath $TempWords -Force
+            }
+        }
+    }
+    finally {
+        $Archive.Dispose()
+    }
+}
+
 function Test-PhysicalRestoreZipUsable {
     param([string]$Path)
 
@@ -754,6 +797,25 @@ function Extract-RestoreWords {
     }
 }
 
+function Restore-CleanPatchSources {
+    param([Parameter(Mandatory = $true)][string]$RestoreZip)
+
+    Write-Step "还原干净补丁底板"
+    Extract-RestoreBaseItems -RestoreZip $RestoreZip -OutputDat $TcBaseItems
+
+    if ($SupportsUniqueWords) {
+        if (Test-ZipEntryExists -ZipPath $RestoreZip -EntryName $TcWordsPath) {
+            Extract-RestoreWords -RestoreZip $RestoreZip -OutputWords $TcWords
+        }
+        elseif ((Test-Path -LiteralPath $TcWords -PathType Leaf) -and -not (Test-WordsLookPatched $TcWords)) {
+            Write-Host "还原包缺少 Words，当前提取的 Words 已确认干净，将作为底板。" -ForegroundColor Yellow
+        }
+        else {
+            throw "缺少可用的干净 Words.datc64，无法保证按补丁范围清理旧传奇价格。请先运行一键还原或修复游戏文件后再更新。"
+        }
+    }
+}
+
 function New-BaseItemZip {
     param(
         [string]$SourceDat,
@@ -835,7 +897,12 @@ function Update-ZipEntryFromFile {
 
     $Archive = [System.IO.Compression.ZipFile]::Open($ZipPath, $Mode)
     try {
-        $OldEntry = $Archive.GetEntry($EntryName)
+        $OldEntry = if ($Mode -eq [System.IO.Compression.ZipArchiveMode]::Update) {
+            $Archive.GetEntry($EntryName)
+        }
+        else {
+            $null
+        }
         if ($null -ne $OldEntry) {
             $OldEntry.Delete()
         }
@@ -1155,7 +1222,13 @@ function Ensure-RestoreZip {
     param([string]$SourceDat)
 
     New-Item -ItemType Directory -Force -Path $RestoreOutDir | Out-Null
-    $SourceLooksPatched = Test-BaseItemsLookPatched $SourceDat
+    $SourceBaseItemsLooksPatched = Test-BaseItemsLookPatched $SourceDat
+    $SourceWordsLooksPatched = $false
+    $SourceWordsAvailable = $SupportsUniqueWords -and (Test-Path -LiteralPath $TcWords -PathType Leaf)
+    if ($SourceWordsAvailable) {
+        $SourceWordsLooksPatched = Test-WordsLookPatched $TcWords
+    }
+    $SourceLooksPatched = $SourceBaseItemsLooksPatched -or $SourceWordsLooksPatched
 
     foreach ($Candidate in (Get-RestoreZipCandidates)) {
         if (Test-Path -LiteralPath $Candidate -PathType Leaf) {
@@ -1167,22 +1240,26 @@ function Ensure-RestoreZip {
             if ($ResolvedCandidate -ne $RestoreOutZip) {
                 Copy-Item -LiteralPath $ResolvedCandidate -Destination $RestoreOutZip -Force
             }
-            if (
-                $SupportsUniqueWords -and
-                (Test-Path -LiteralPath $TcWords -PathType Leaf) -and
-                -not (Test-WordsLookPatched $TcWords) -and
-                -not (Test-ZipEntryExists -ZipPath $RestoreOutZip -EntryName $TcWordsPath)
-            ) {
-                Update-ZipEntryFromFile -ZipPath $RestoreOutZip -SourceDat $TcWords -EntryName $TcWordsPath
+            if ($SupportsUniqueWords -and -not (Test-RestoreZipWordsUsable $RestoreOutZip)) {
+                if ($SourceWordsAvailable -and -not $SourceWordsLooksPatched) {
+                    Update-ZipEntryFromFile -ZipPath $RestoreOutZip -SourceDat $TcWords -EntryName $TcWordsPath
+                }
+                elseif ($SourceWordsLooksPatched) {
+                    Write-Warning "忽略缺少干净 Words 的还原包：$Candidate"
+                    continue
+                }
+                else {
+                    Write-Warning "还原包缺少 Words，且当前没有可用的 Words 文件：$Candidate"
+                }
             }
             return (Resolve-Path -LiteralPath $RestoreOutZip).Path
         }
     }
 
     if (-not $SourceLooksPatched) {
-        Write-Host "正在用当前干净 BaseItemTypes 刷新固定还原包..." -ForegroundColor Yellow
+        Write-Host "正在用当前干净 BaseItemTypes/Words 刷新固定还原包..." -ForegroundColor Yellow
         $CleanTcWords = ""
-        if ($SupportsUniqueWords -and (Test-Path -LiteralPath $TcWords -PathType Leaf) -and -not (Test-WordsLookPatched $TcWords)) {
+        if ($SourceWordsAvailable -and -not $SourceWordsLooksPatched) {
             $CleanTcWords = $TcWords
         }
         if ([bool]$InstallInfo.IsChina -or [string]$InstallInfo.InstallKind -like "CN-*") {
@@ -1215,7 +1292,7 @@ function Ensure-RestoreZip {
         return $PhysicalBaseItemZip
     }
 
-    throw "当前 BaseItemTypes 已包含物价补丁标记，并且没有找到兼容的还原包。请先让官方启动器完成更新或修复游戏文件，然后重新运行一键更新。"
+    throw "当前 BaseItemTypes 或 Words 已包含物价补丁标记，并且没有找到兼容的干净还原包。请先运行一键还原，或让官方启动器完成更新/修复游戏文件后重新运行一键更新。"
 }
 
 function Resolve-BundleExtractor {
@@ -1380,7 +1457,7 @@ if (-not $SkipExtract) {
         }
         Write-Host "已提取到：$TcBaseItems"
 
-        if ($SupportsUniqueWords -and $PatchUniqueWordsEnabled) {
+        if ($SupportsUniqueWords) {
             Write-Host "正在提取英文 Words..."
             & $BundledBundleExtractorExe $Bundles2Paths.IndexBin "data/balance/words.datc64" $EnWords
             if ($LASTEXITCODE -ne 0) {
@@ -1395,15 +1472,17 @@ if (-not $SkipExtract) {
             }
             Write-Host "已提取到：$TcWords"
 
-            Write-Host "正在提取 UniqueGoldPrices..."
-            & $BundledBundleExtractorExe $Bundles2Paths.IndexBin "data/balance/uniquegoldprices.datc64" $UniqueGoldPrices
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to extract UniqueGoldPrices. Exit code: $LASTEXITCODE"
+            if ($PatchUniqueWordsEnabled) {
+                Write-Host "正在提取 UniqueGoldPrices..."
+                & $BundledBundleExtractorExe $Bundles2Paths.IndexBin "data/balance/uniquegoldprices.datc64" $UniqueGoldPrices
+                if ($LASTEXITCODE -ne 0) {
+                    throw "Failed to extract UniqueGoldPrices. Exit code: $LASTEXITCODE"
+                }
+                Write-Host "已提取到：$UniqueGoldPrices"
             }
-            Write-Host "已提取到：$UniqueGoldPrices"
-        }
-        elseif ($SupportsUniqueWords) {
-            Write-Host "当前选择只打通货补丁，已跳过传奇物品 Words 提取。" -ForegroundColor Yellow
+            else {
+                Write-Host "当前选择只打通货补丁，已跳过 UniqueGoldPrices 提取。" -ForegroundColor Yellow
+            }
         }
         else {
             Write-Host "当前语言不支持传奇物品 Words 提取，已跳过。语言：$DisplayLanguageName" -ForegroundColor Yellow
@@ -1434,24 +1513,17 @@ if ($GameMode -eq "GGPK" -and -not (Test-BaseItemsLookPatched $TcBaseItems)) {
     $RestoreZip = Update-IntlRestoreZipFromExtractedBaseItems -ZipPath $RestoreZip
 }
 $SourceBaseItemsLooksPatched = Test-BaseItemsLookPatched $TcBaseItems
-if ($SourceBaseItemsLooksPatched -and $GameMode -eq "GGPK") {
-    Write-Host "当前 BaseItemTypes 已包含补丁标记，正在从固定还原包重建干净文件..." -ForegroundColor Yellow
-    Extract-RestoreBaseItems -RestoreZip $RestoreZip -OutputDat $TcBaseItems
-}
 $SourceWordsLooksPatched = $false
-if ($PatchUniqueWordsEnabled -and $SupportsUniqueWords -and (Test-Path -LiteralPath $TcWords -PathType Leaf)) {
+if ($SupportsUniqueWords -and (Test-Path -LiteralPath $TcWords -PathType Leaf)) {
     $SourceWordsLooksPatched = Test-WordsLookPatched $TcWords
 }
 if ($SourceBaseItemsLooksPatched -and $GameMode -eq "Bundles2") {
     Write-Host "当前 BaseItemTypes 已包含物价标记，将保留当前 Bundles2 底板并只替换物价层。" -ForegroundColor Yellow
 }
-if ($PatchUniqueWordsEnabled -and $SupportsUniqueWords -and $SourceWordsLooksPatched -and $GameMode -eq "GGPK") {
-    Write-Host "当前 Words.datc64 已包含传奇价格标记，正在从固定还原包重建干净文件..." -ForegroundColor Yellow
-    Extract-RestoreWords -RestoreZip $RestoreZip -OutputWords $TcWords
-}
-elseif ($PatchUniqueWordsEnabled -and $SupportsUniqueWords -and $SourceWordsLooksPatched -and $GameMode -eq "Bundles2") {
+if ($SupportsUniqueWords -and $SourceWordsLooksPatched -and $GameMode -eq "Bundles2") {
     Write-Host "当前 Words.datc64 已包含传奇价格标记，将在生成补丁时清理并重打。" -ForegroundColor Yellow
 }
+Restore-CleanPatchSources -RestoreZip $RestoreZip
 $CanPatchUniqueWords = (
     $PatchUniqueWordsEnabled -and
     $SupportsUniqueWords -and

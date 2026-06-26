@@ -647,6 +647,7 @@ def list_unique_word_price_candidates(
 
 def upsert_zip_entry(zip_path: Path, entry_name: str, data: bytes) -> None:
     entry_name = entry_name.replace("\\", "/")
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
     existing: list[tuple[zipfile.ZipInfo, bytes]] = []
     if zip_path.exists():
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -1535,6 +1536,9 @@ def main(argv: list[str]) -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     patch_base_items = args.patch_scope in {"all", "currency"}
     patch_unique_words = args.patch_scope in {"all", "uniques"}
+    effective_patch_unique_words = patch_unique_words and not args.no_uniques
+    if args.patch_scope == "uniques" and args.no_uniques:
+        raise SystemExit("--patch-scope=uniques cannot be combined with --no-uniques")
 
     base_pairs = load_base_item_pairs(args.en_baseitems, args.tc_baseitems)
     unique_categories: list[dict[str, Any]] = []
@@ -1565,7 +1569,7 @@ def main(argv: list[str]) -> int:
             client,
             args.api_base.rstrip("/"),
             args.league,
-            include_uniques=patch_unique_words and not args.no_uniques,
+            include_uniques=effective_patch_unique_words,
             max_workers=max(1, args.max_workers),
         )
         (args.out_dir / "poe2scout_fallback_raw.json").write_text(
@@ -1576,7 +1580,7 @@ def main(argv: list[str]) -> int:
             client,
             args.api_base.rstrip("/"),
             args.league,
-            include_uniques=patch_unique_words and not args.no_uniques,
+            include_uniques=effective_patch_unique_words,
             max_workers=max(1, args.max_workers),
         )
         (args.out_dir / "poe2scout_raw.json").write_text(
@@ -1643,7 +1647,7 @@ def main(argv: list[str]) -> int:
     unique_words_patched = 0
     can_patch_unique_words = (
         patch_unique_words
-        and not args.no_uniques
+        and effective_patch_unique_words
         and args.en_words.exists()
         and args.tc_words.exists()
         and args.unique_gold_prices.exists()
@@ -1716,6 +1720,9 @@ def main(argv: list[str]) -> int:
     }
 
     if not args.no_build_patch:
+        words_game_path = args.words_game_path or (
+            (args.game_path or "").replace("baseitemtypes.datc64", "words.datc64")
+        )
         if patch_base_items:
             run_patch_builder(
                 patch_script=args.patch_script,
@@ -1727,12 +1734,13 @@ def main(argv: list[str]) -> int:
                 patched_dat=args.patched_dat,
                 game_path=args.game_path,
             )
-        elif output_zip.exists():
-            output_zip.unlink()
+        else:
+            if not args.game_path:
+                raise SystemExit("--game-path is required when patch-scope=uniques")
+            if output_zip.exists():
+                output_zip.unlink()
+            upsert_zip_entry(output_zip, args.game_path, args.tc_baseitems.read_bytes())
         if can_patch_unique_words:
-            words_game_path = args.words_game_path or (
-                (args.game_path or "").replace("baseitemtypes.datc64", "words.datc64")
-            )
             if words_game_path:
                 patched_words = args.patched_words or (args.out_dir / "words.patched.datc64")
                 if args.unique_price_label_mode in {"markup", "overlay", "newline"}:
@@ -1800,6 +1808,21 @@ def main(argv: list[str]) -> int:
                             args.tc_words.read_bytes(),
                         )
                         summary["unique_words_clean_passthrough"] = True
+            else:
+                raise SystemExit(
+                    "--words-game-path is required when patching unique Words prices"
+                )
+        elif args.tc_words.exists() and words_game_path:
+            upsert_zip_entry(output_zip, words_game_path, args.tc_words.read_bytes())
+            summary["unique_words_clean_passthrough"] = True
+            if patch_unique_words and not args.no_uniques:
+                unique_word_missing.append(
+                    {
+                        "api_id": "",
+                        "en_name": "",
+                        "reason": "missing Words or UniqueGoldPrices datc64 files",
+                    }
+                )
         elif patch_unique_words and not args.no_uniques:
             unique_word_missing.append(
                 {

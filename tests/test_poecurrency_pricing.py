@@ -1,6 +1,7 @@
 import importlib.util
 import sys
 import unittest
+import zipfile
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -252,14 +253,16 @@ class PoecurrencyPricingTests(unittest.TestCase):
         self.assertEqual(count, 0)
         self.assertEqual(rows[0]["price"], "14.00D")
 
-    def test_patch_scope_currency_skips_unique_words(self):
+    def test_patch_scope_currency_keeps_clean_words_entry(self):
         with TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
+            (out_dir / "tc_words.datc64").write_bytes(b"clean words")
             calls = {"base": 0, "words": 0}
 
             def fake_run_patch_builder(**kwargs):
                 calls["base"] += 1
-                kwargs["output_zip"].write_bytes(b"zip")
+                with zipfile.ZipFile(kwargs["output_zip"], "w") as zf:
+                    zf.writestr("data/balance/baseitemtypes.datc64", b"base")
 
             def fake_patch_unique_word_prices(**kwargs):
                 calls["words"] += 1
@@ -300,17 +303,22 @@ class PoecurrencyPricingTests(unittest.TestCase):
                         str(out_dir / "unique.datc64"),
                         "--game-path",
                         "data/balance/baseitemtypes.datc64",
+                        "--words-game-path",
+                        "data/balance/words.datc64",
                     ]
                 )
 
             self.assertEqual(rc, 0)
             self.assertEqual(calls, {"base": 1, "words": 0})
+            with zipfile.ZipFile(out_dir / "patch.zip", "r") as zf:
+                self.assertEqual(zf.read("data/balance/words.datc64"), b"clean words")
 
-    def test_patch_scope_uniques_skips_base_items(self):
+    def test_patch_scope_uniques_keeps_clean_base_items_entry(self):
         with TemporaryDirectory() as tmp:
             out_dir = Path(tmp)
             for name in ("en_words.datc64", "tc_words.datc64", "unique.datc64"):
                 (out_dir / name).write_bytes(b"data")
+            (out_dir / "tc.datc64").write_bytes(b"clean baseitems")
             calls = {"base": 0, "words": 0}
 
             def fake_run_patch_builder(**kwargs):
@@ -335,8 +343,6 @@ class PoecurrencyPricingTests(unittest.TestCase):
                 self.price_patch, "run_patch_builder", side_effect=fake_run_patch_builder
             ), patch.object(
                 self.price_patch, "patch_unique_word_prices", side_effect=fake_patch_unique_word_prices
-            ), patch.object(
-                self.price_patch, "upsert_zip_entry", return_value=None
             ):
                 rc = self.price_patch.main(
                     [
@@ -358,11 +364,18 @@ class PoecurrencyPricingTests(unittest.TestCase):
                         str(out_dir / "unique.datc64"),
                         "--game-path",
                         "data/balance/baseitemtypes.datc64",
+                        "--words-game-path",
+                        "data/balance/words.datc64",
                     ]
                 )
 
             self.assertEqual(rc, 0)
             self.assertEqual(calls, {"base": 0, "words": 1})
+            with zipfile.ZipFile(out_dir / "patch.zip", "r") as zf:
+                self.assertEqual(
+                    zf.read("data/balance/baseitemtypes.datc64"), b"clean baseitems"
+                )
+                self.assertEqual(zf.read("data/balance/words.datc64"), b"words")
 
 
 if __name__ == "__main__":
