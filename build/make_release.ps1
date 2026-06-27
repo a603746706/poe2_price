@@ -148,26 +148,37 @@ function Copy-IntlRestorePackage {
     $RestoreEntryNames = @(
         "data/balance/baseitemtypes.datc64",
         "data/balance/words.datc64",
+        "data/balance/endgamemaps.datc64",
         "data/balance/traditional chinese/baseitemtypes.datc64",
         "data/balance/traditional chinese/words.datc64",
+        "data/balance/traditional chinese/endgamemaps.datc64",
         "data/balance/simplified chinese/baseitemtypes.datc64",
         "data/balance/simplified chinese/words.datc64",
+        "data/balance/simplified chinese/endgamemaps.datc64",
         "data/balance/japanese/baseitemtypes.datc64",
         "data/balance/japanese/words.datc64",
+        "data/balance/japanese/endgamemaps.datc64",
         "data/balance/korean/baseitemtypes.datc64",
         "data/balance/korean/words.datc64",
+        "data/balance/korean/endgamemaps.datc64",
         "data/balance/russian/baseitemtypes.datc64",
         "data/balance/russian/words.datc64",
+        "data/balance/russian/endgamemaps.datc64",
         "data/balance/french/baseitemtypes.datc64",
         "data/balance/french/words.datc64",
+        "data/balance/french/endgamemaps.datc64",
         "data/balance/german/baseitemtypes.datc64",
         "data/balance/german/words.datc64",
+        "data/balance/german/endgamemaps.datc64",
         "data/balance/spanish/baseitemtypes.datc64",
         "data/balance/spanish/words.datc64",
+        "data/balance/spanish/endgamemaps.datc64",
         "data/balance/portuguese/baseitemtypes.datc64",
         "data/balance/portuguese/words.datc64",
+        "data/balance/portuguese/endgamemaps.datc64",
         "data/balance/thai/baseitemtypes.datc64",
-        "data/balance/thai/words.datc64"
+        "data/balance/thai/words.datc64",
+        "data/balance/thai/endgamemaps.datc64"
     )
     Copy-Item -LiteralPath $IntlRestoreSeed -Destination $Destination -Force
 
@@ -181,6 +192,9 @@ function Copy-IntlRestorePackage {
             $CacheDat = Join-Path $RestoreBaseItemsCacheDir $CacheName
             $MinLength = if ($RestoreEntryName.EndsWith("baseitemtypes.datc64", [System.StringComparison]::OrdinalIgnoreCase)) {
                 1048576
+            }
+            elseif ($RestoreEntryName.EndsWith("endgamemaps.datc64", [System.StringComparison]::OrdinalIgnoreCase)) {
+                4096
             }
             else {
                 1024
@@ -476,6 +490,7 @@ function Build-Payload {
         "update_price_patch.ps1",
         "restore_price_patch.ps1",
         "poe2_name_price_patch.py",
+        "poe2_island_rumour_patch.py",
         "build_poe2scout_price_patch.py"
     )) {
         $Source = Join-Path $SourceToolsDir $FileName
