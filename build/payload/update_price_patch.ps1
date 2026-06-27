@@ -1798,10 +1798,10 @@ if ($PatchScope -eq "uniques" -and -not $CanPatchUniqueWords) {
 Compact-LatestBaseItems $LatestDir @($EnBaseItems, $TcBaseItems, $EnWords, $TcWords, $TcEndgameMaps, $UniqueGoldPrices)
 try {
     $RestoreZip = Ensure-RestoreZip $TcBaseItems
-    if ($GameMode -eq "GGPK" -and -not (Test-BaseItemsLookPatched $TcBaseItems)) {
+    if (-not ([bool]$InstallInfo.IsChina -or [string]$InstallInfo.InstallKind -like "CN-*") -and -not (Test-BaseItemsLookPatched $TcBaseItems)) {
         $RestoreZip = Update-IntlRestoreZipFromExtractedBaseItems -ZipPath $RestoreZip
     }
-    if (-not ([bool]$InstallInfo.IsChina -or [string]$InstallInfo.InstallKind -like "CN-*")) {
+    if ($RestoreZip -ne $RestorePatchFolderZip) {
         Copy-Item -LiteralPath $RestoreZip -Destination $RestorePatchFolderZip -Force
     }
 }

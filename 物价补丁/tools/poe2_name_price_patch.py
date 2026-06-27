@@ -536,7 +536,38 @@ def build_patch(
         entries, rows, separator, keep_existing_price, mode, patch_same_name_duplicates
     )
     if not replacements:
-        raise SystemExit("no replacements were generated")
+        info = {
+            "source": str(source),
+            "output_zip": str(output_zip),
+            "game_path": game_path.replace("\\", "/"),
+            "mode": mode,
+            "fixed_length": mode == "fixed",
+            "append_string_table": mode == "append",
+            "source_size": len(data),
+            "patched_size": len(data),
+            "size_delta": 0,
+            "patched_names": 0,
+            "patch_same_name_duplicates": patch_same_name_duplicates,
+            "full_text_names": 0,
+            "compacted_names": 0,
+            "replacements": [],
+            "warnings": warnings + ["no replacements were generated"],
+            "zip_written": False,
+        }
+        if report:
+            report.parent.mkdir(parents=True, exist_ok=True)
+            report.write_text(
+                json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        if patched_dat:
+            patched_dat.parent.mkdir(parents=True, exist_ok=True)
+            patched_dat.write_bytes(data)
+        print("patched names: 0")
+        print("zip written: no")
+        print("warnings:")
+        for warning in info["warnings"]:
+            print(f"  - {warning}")
+        return
 
     if mode == "append":
         patched = apply_replacements_append(data, replacements)
@@ -585,6 +616,7 @@ def build_patch(
             for replacement in replacements
         ],
         "warnings": warnings,
+        "zip_written": True,
     }
     if report:
         report.parent.mkdir(parents=True, exist_ok=True)
