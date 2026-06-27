@@ -63,50 +63,57 @@ function Show-PatchScopeDialog {
     $Form.MaximizeBox = $false
     $Form.MinimizeBox = $false
     $Form.TopMost = $true
-    $Form.ClientSize = New-Object System.Drawing.Size(560, 312)
+    $Form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Font
+    $Form.ClientSize = New-Object System.Drawing.Size(620, 360)
     $Form.Font = New-Object System.Drawing.Font("Microsoft YaHei UI", 9)
 
     $Title = New-Object System.Windows.Forms.Label
     $Title.Text = (New-Utf16Text @(0x9009, 0x62E9, 0x672C, 0x6B21, 0x8981, 0x5199, 0x5165, 0x7684, 0x8865, 0x4E01, 0x5185, 0x5BB9))
     $Title.AutoSize = $true
-    $Title.Location = New-Object System.Drawing.Point(18, 18)
+    $Title.Location = New-Object System.Drawing.Point(24, 22)
     $Title.Font = New-Object System.Drawing.Font($Form.Font.FontFamily, 11, [System.Drawing.FontStyle]::Bold)
     $Form.Controls.Add($Title)
 
     $Group = New-Object System.Windows.Forms.GroupBox
     $Group.Text = (New-Utf16Text @(0x8865, 0x4E01, 0x8303, 0x56F4))
-    $Group.Location = New-Object System.Drawing.Point(18, 52)
-    $Group.Size = New-Object System.Drawing.Size(382, 120)
+    $Group.Location = New-Object System.Drawing.Point(24, 60)
+    $Group.Size = New-Object System.Drawing.Size(572, 124)
     $Form.Controls.Add($Group)
 
     $All = New-Object System.Windows.Forms.RadioButton
     $All.Text = (Get-PatchScopeDisplayName "all")
     $All.Tag = "all"
     $All.Checked = $true
-    $All.Location = New-Object System.Drawing.Point(18, 28)
+    $All.Location = New-Object System.Drawing.Point(22, 30)
     $All.AutoSize = $true
     $Group.Controls.Add($All)
 
     $Currency = New-Object System.Windows.Forms.RadioButton
     $Currency.Text = (Get-PatchScopeDisplayName "currency")
     $Currency.Tag = "currency"
-    $Currency.Location = New-Object System.Drawing.Point(18, 58)
+    $Currency.Location = New-Object System.Drawing.Point(22, 60)
     $Currency.AutoSize = $true
     $Group.Controls.Add($Currency)
 
     $Uniques = New-Object System.Windows.Forms.RadioButton
     $Uniques.Text = (Get-PatchScopeDisplayName "uniques")
     $Uniques.Tag = "uniques"
-    $Uniques.Location = New-Object System.Drawing.Point(18, 88)
+    $Uniques.Location = New-Object System.Drawing.Point(22, 90)
     $Uniques.AutoSize = $true
     $Group.Controls.Add($Uniques)
+
+    $OptionsGroup = New-Object System.Windows.Forms.GroupBox
+    $OptionsGroup.Text = (New-Utf16Text @(0x9644, 0x52A0, 0x9009, 0x9879))
+    $OptionsGroup.Location = New-Object System.Drawing.Point(24, 202)
+    $OptionsGroup.Size = New-Object System.Drawing.Size(252, 82)
+    $Form.Controls.Add($OptionsGroup)
 
     $IslandRumourCheck = New-Object System.Windows.Forms.CheckBox
     $IslandRumourCheck.Text = (New-Utf16Text @(0x5C9B, 0x5C7F, 0x4F20, 0x8A00, 0x63D0, 0x793A))
     $IslandRumourCheck.Tag = "island-rumour-hints"
-    $IslandRumourCheck.Location = New-Object System.Drawing.Point(36, 184)
+    $IslandRumourCheck.Location = New-Object System.Drawing.Point(20, 34)
     $IslandRumourCheck.AutoSize = $true
-    $Form.Controls.Add($IslandRumourCheck)
+    $OptionsGroup.Controls.Add($IslandRumourCheck)
 
     $OpenLink = {
         param($Sender, $EventArgs)
@@ -124,40 +131,52 @@ function Show-PatchScopeDialog {
         }
     }
 
-    $UpdateLabel = New-Object System.Windows.Forms.Label
-    $UpdateLabel.Text = "更新地址:"
-    $UpdateLabel.Location = New-Object System.Drawing.Point(190, 184)
-    $UpdateLabel.AutoSize = $true
-    $Form.Controls.Add($UpdateLabel)
+    $LinksGroup = New-Object System.Windows.Forms.GroupBox
+    $LinksGroup.Text = "更新地址"
+    $LinksGroup.Location = New-Object System.Drawing.Point(292, 202)
+    $LinksGroup.Size = New-Object System.Drawing.Size(304, 82)
+    $Form.Controls.Add($LinksGroup)
+
+    $GitHubCaption = New-Object System.Windows.Forms.Label
+    $GitHubCaption.Text = "GitHub:"
+    $GitHubCaption.Location = New-Object System.Drawing.Point(18, 29)
+    $GitHubCaption.AutoSize = $true
+    $LinksGroup.Controls.Add($GitHubCaption)
 
     $GitHubLink = New-Object System.Windows.Forms.LinkLabel
     $GitHubLink.Text = "weixiao030/poe2_price"
     $GitHubLink.Tag = "https://github.com/weixiao030/poe2_price"
-    $GitHubLink.Location = New-Object System.Drawing.Point(258, 181)
-    $GitHubLink.Size = New-Object System.Drawing.Size(180, 22)
+    $GitHubLink.Location = New-Object System.Drawing.Point(86, 26)
+    $GitHubLink.AutoSize = $true
     $GitHubLink.Add_LinkClicked($OpenLink)
-    $Form.Controls.Add($GitHubLink)
+    $LinksGroup.Controls.Add($GitHubLink)
+
+    $CaimoguCaption = New-Object System.Windows.Forms.Label
+    $CaimoguCaption.Text = (New-Utf16Text @(0x8E29, 0x8611, 0x83C7, 0x003A))
+    $CaimoguCaption.Location = New-Object System.Drawing.Point(18, 53)
+    $CaimoguCaption.AutoSize = $true
+    $LinksGroup.Controls.Add($CaimoguCaption)
 
     $CaimoguLink = New-Object System.Windows.Forms.LinkLabel
     $CaimoguLink.Text = "caimogu.cc/post/2403703.html"
     $CaimoguLink.Tag = "https://www.caimogu.cc/post/2403703.html"
-    $CaimoguLink.Location = New-Object System.Drawing.Point(258, 206)
-    $CaimoguLink.Size = New-Object System.Drawing.Size(250, 22)
+    $CaimoguLink.Location = New-Object System.Drawing.Point(86, 50)
+    $CaimoguLink.AutoSize = $true
     $CaimoguLink.Add_LinkClicked($OpenLink)
-    $Form.Controls.Add($CaimoguLink)
+    $LinksGroup.Controls.Add($CaimoguLink)
 
     $OkButton = New-Object System.Windows.Forms.Button
     $OkButton.Text = (New-Utf16Text @(0x5F00, 0x59CB, 0x66F4, 0x65B0))
-    $OkButton.Location = New-Object System.Drawing.Point(348, 262)
-    $OkButton.Size = New-Object System.Drawing.Size(90, 32)
+    $OkButton.Location = New-Object System.Drawing.Point(390, 310)
+    $OkButton.Size = New-Object System.Drawing.Size(96, 32)
     $OkButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $Form.AcceptButton = $OkButton
     $Form.Controls.Add($OkButton)
 
     $CancelButton = New-Object System.Windows.Forms.Button
     $CancelButton.Text = (New-Utf16Text @(0x53D6, 0x6D88))
-    $CancelButton.Location = New-Object System.Drawing.Point(450, 262)
-    $CancelButton.Size = New-Object System.Drawing.Size(90, 32)
+    $CancelButton.Location = New-Object System.Drawing.Point(500, 310)
+    $CancelButton.Size = New-Object System.Drawing.Size(96, 32)
     $CancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $Form.CancelButton = $CancelButton
     $Form.Controls.Add($CancelButton)
