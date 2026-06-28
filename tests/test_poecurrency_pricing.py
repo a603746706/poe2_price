@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import unittest
 import zipfile
@@ -492,6 +493,73 @@ class PoecurrencyPricingTests(unittest.TestCase):
                     zf.read("data/balance/baseitemtypes.datc64"), b"cleaned baseitems"
                 )
                 self.assertEqual(zf.read("data/balance/words.datc64"), b"current words")
+
+    def test_cn_reference_source_failure_continues_with_primary_prices(self):
+        summary = [
+            {
+                "category_label": "通货仓库",
+                "items": [
+                    {
+                        "item_name": "神圣石",
+                        "latest_buy1": 300,
+                        "latest_sell1": 300,
+                        "currency_unit": "e",
+                    },
+                    {
+                        "item_name": "测试物品",
+                        "latest_buy1": 2,
+                        "latest_sell1": 2,
+                        "currency_unit": "d",
+                    },
+                ],
+            }
+        ]
+
+        for source, function_name, error_file in (
+            ("poe2scout", "build_scout_prices", "poe2scout_fallback_error.json"),
+            (
+                "poe2db-economy",
+                "build_poe2db_economy_prices",
+                "poe2db_economy_fallback_error.json",
+            ),
+        ):
+            with self.subTest(source=source), TemporaryDirectory() as tmp:
+                out_dir = Path(tmp)
+                tc_baseitems = out_dir / "tc.datc64"
+                tc_baseitems.write_bytes(b"baseitems")
+
+                with patch.object(
+                    self.price_patch, "load_localized_base_item_pairs", return_value=[]
+                ), patch.object(
+                    self.price_patch, "fetch_poecurrency_summary", return_value=summary
+                ), patch.object(
+                    self.price_patch, function_name, side_effect=RuntimeError("blocked")
+                ):
+                    rc = self.price_patch.main(
+                        [
+                            "--price-source",
+                            "poecurrency-cn",
+                            "--cn-reference-source",
+                            source,
+                            "--patch-scope",
+                            "currency",
+                            "--no-build-patch",
+                            "--no-uniques",
+                            "--out-dir",
+                            str(out_dir),
+                            "--en-baseitems",
+                            str(out_dir / "missing_en.datc64"),
+                            "--tc-baseitems",
+                            str(tc_baseitems),
+                        ]
+                    )
+
+                self.assertEqual(rc, 0)
+                summary_json = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+                self.assertEqual(summary_json["cn_reference_status"], "failed")
+                self.assertEqual(len(summary_json["cn_reference_warnings"]), 1)
+                self.assertIn(source, summary_json["cn_reference_warnings"][0])
+                self.assertTrue((out_dir / error_file).exists())
 
 
 if __name__ == "__main__":

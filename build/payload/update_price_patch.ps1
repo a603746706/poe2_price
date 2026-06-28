@@ -382,6 +382,20 @@ function Convert-ErrorMessage {
             -Details @("提取工具退出码：$($Matches[2])")
     }
 
+    if ($Message -match '^Price fetch or patch build failed\. Exit code: (.+?)\. Log: (.+)$') {
+        return New-FailureMessage `
+            -Reason "获取价格或生成补丁失败。" `
+            -Suggestions @(
+                "请检查网络是否能访问当前价格源。",
+                "如果是临时网络问题，稍后重新运行一键更新即可。",
+                "如果仍然失败，把下方构建日志一起发给作者排查。"
+            ) `
+            -Details @(
+                "脚本退出码：$($Matches[1])",
+                "构建日志：$($Matches[2])"
+            )
+    }
+
     if ($Message -match '^Price fetch or patch build failed\. Exit code: (.+)$') {
         return New-FailureMessage `
             -Reason "获取价格或生成补丁失败。" `
@@ -1612,6 +1626,7 @@ $PatchedEndgameMaps = Join-Path $OutDir "endgamemaps.patched.datc64"
 $ReportJson = Join-Path $OutDir "price_patch.report.json"
 $IslandRumourReportJson = Join-Path $OutDir "island_rumour_patch.report.json"
 $SummaryJson = Join-Path $OutDir "summary.json"
+$PriceBuildLog = Join-Path $OutDir "price_patch_build.log"
 $EnglishBaseItemsUnavailable = $false
 $EnglishWordsUnavailable = $false
 
@@ -1920,9 +1935,11 @@ if ($IsChinaClient) {
     }
 }
 
+New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $BuildResult = Invoke-Poe2Python -Python $Python -ArgumentList $BuildArgs
+$BuildResult.Text | Out-File -LiteralPath $PriceBuildLog -Encoding UTF8
 if ($BuildResult.ExitCode -ne 0) {
-    throw "Price fetch or patch build failed. Exit code: $($BuildResult.ExitCode)"
+    throw "Price fetch or patch build failed. Exit code: $($BuildResult.ExitCode). Log: $PriceBuildLog"
 }
 
 Assert-File $PatchZip $PricePatchZipName

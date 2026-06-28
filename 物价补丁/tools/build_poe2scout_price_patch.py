@@ -1779,6 +1779,8 @@ def main(argv: list[str]) -> int:
     fallback_rows_added = 0
     high_value_reference_rows = 0
     fallback_unique_words_patched = 0
+    cn_reference_status = "disabled"
+    cn_reference_warnings: list[str] = []
     best: dict[str, PriceObservation] = {}
     rows: list[dict[str, str]] = []
     missing: list[dict[str, str]] = []
@@ -1799,25 +1801,69 @@ def main(argv: list[str]) -> int:
             if isinstance(category, dict)
         )
         if args.cn_reference_source == "poe2scout":
-            scout_fallback, scout_fallback_prices, unique_categories, unique_items = build_scout_prices(
-                client,
-                args.api_base.rstrip("/"),
-                args.league,
-                include_uniques=effective_patch_unique_words,
-                max_workers=max(1, args.max_workers),
-            )
-            (args.out_dir / "poe2scout_fallback_raw.json").write_text(
-                json.dumps(scout_fallback, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            cn_reference_status = "ok"
+            try:
+                scout_fallback, scout_fallback_prices, unique_categories, unique_items = build_scout_prices(
+                    client,
+                    args.api_base.rstrip("/"),
+                    args.league,
+                    include_uniques=effective_patch_unique_words,
+                    max_workers=max(1, args.max_workers),
+                )
+                (args.out_dir / "poe2scout_fallback_raw.json").write_text(
+                    json.dumps(scout_fallback, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception as exc:
+                cn_reference_status = "failed"
+                warning = (
+                    "cn reference source poe2scout failed; "
+                    f"continuing with poecurrency-cn only: {type(exc).__name__}: {exc}"
+                )
+                cn_reference_warnings.append(warning)
+                print(f"warning: {warning}", file=sys.stderr)
+                (args.out_dir / "poe2scout_fallback_error.json").write_text(
+                    json.dumps(
+                        {
+                            "source": "poe2scout",
+                            "status": "failed",
+                            "error": warning,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
         elif args.cn_reference_source == "poe2db-economy":
-            scout_fallback, scout_fallback_prices = build_poe2db_economy_prices(
-                client,
-                args.poe2db_economy_us_url,
-                args.poe2db_economy_cn_url,
-            )
-            (args.out_dir / "poe2db_economy_fallback_raw.json").write_text(
-                json.dumps(scout_fallback, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            cn_reference_status = "ok"
+            try:
+                scout_fallback, scout_fallback_prices = build_poe2db_economy_prices(
+                    client,
+                    args.poe2db_economy_us_url,
+                    args.poe2db_economy_cn_url,
+                )
+                (args.out_dir / "poe2db_economy_fallback_raw.json").write_text(
+                    json.dumps(scout_fallback, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+            except Exception as exc:
+                cn_reference_status = "failed"
+                warning = (
+                    "cn reference source poe2db-economy failed; "
+                    f"continuing with poecurrency-cn only: {type(exc).__name__}: {exc}"
+                )
+                cn_reference_warnings.append(warning)
+                print(f"warning: {warning}", file=sys.stderr)
+                (args.out_dir / "poe2db_economy_fallback_error.json").write_text(
+                    json.dumps(
+                        {
+                            "source": "poe2db-economy",
+                            "status": "failed",
+                            "error": warning,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
     else:
         scout, best, unique_categories, unique_items = build_scout_prices(
             client,
@@ -1971,6 +2017,8 @@ def main(argv: list[str]) -> int:
             args.price_source == "poecurrency-cn" and args.cn_reference_source == "poe2scout"
         ),
         "cn_reference_source": args.cn_reference_source,
+        "cn_reference_status": cn_reference_status,
+        "cn_reference_warnings": cn_reference_warnings,
         "poe2db_fallback": bool(args.poe2db_fallback),
     }
 
