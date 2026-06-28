@@ -39,6 +39,7 @@ DEFAULT_SCOUT_API = "https://api.poe2scout.com"
 DEFAULT_POECURRENCY_SUMMARY_API = "https://poecurrency.top/api/summary?version=2"
 DEFAULT_POE_NINJA_CURRENCY_URL = "https://poe.ninja/poe2/economy/runesofaldur/currency"
 DEFAULT_POE_NINJA_API_URL = "https://poe.ninja/poe2/api/economy/exchange/current/overview"
+DEFAULT_POE_NINJA_ITEM_API_URL = "https://poe.ninja/poe2/api/economy/stash/current/item/overview"
 DEFAULT_POE_NINJA_LEAGUE = "Runes of Aldur"
 DEFAULT_POE2DB_ECONOMY_US_URL = "https://poe2db.tw/Economy"
 DEFAULT_POE2DB_ECONOMY_CN_URL = "https://poe2db.tw/cn/Economy"
@@ -89,6 +90,33 @@ DEFAULT_UNIQUE_CATEGORIES = (
     "map",
     "weapon",
     "sanctum",
+)
+POE_NINJA_EXCHANGE_TYPES = (
+    "Currency",
+    "Fragments",
+    "Abyss",
+    "UncutGems",
+    "LineageSupportGems",
+    "Essences",
+    "SoulCores",
+    "Idols",
+    "Runes",
+    "Ritual",
+    "Expedition",
+    "Delirium",
+    "Breach",
+    "Verisium",
+)
+POE_NINJA_ITEM_TYPES = (
+    "UniqueWeapons",
+    "UniqueArmours",
+    "UniqueAccessories",
+    "UniqueFlasks",
+    "UniqueCharms",
+    "UniqueJewels",
+    "UniqueSanctumRelics",
+    "UniqueTablets",
+    "PrecursorTablets",
 )
 WORDS_ROW_SIZE = 64
 WORDS_EN_NAME_OFFSET = 4
@@ -886,6 +914,11 @@ def poe_ninja_api_url_from_page(page_url: str, api_url: str, league: str) -> str
     return f"{api_url}?{query}"
 
 
+def poe_ninja_api_url(api_url: str, league: str, item_type: str) -> str:
+    query = urllib.parse.urlencode({"league": league, "type": item_type})
+    return f"{api_url}?{query}"
+
+
 def decimal_from_text(text: str) -> Decimal:
     cleaned = re.sub(r"[^0-9.]", "", text)
     if not cleaned:
@@ -1034,6 +1067,11 @@ def build_poe2db_economy_prices(
         cn_rows.update(page_cn_rows)
         page_stats.append(stat)
 
+    failed_pages = [stat for stat in page_stats if stat.get("status") != "ok"]
+    if failed_pages and len(category_pages) > 1:
+        failed_names = ", ".join(str(stat.get("page")) for stat in failed_pages)
+        raise ValueError(f"Poe2DB Economy category pages failed: {failed_names}")
+
     if not us_rows:
         raise ValueError("Poe2DB US Economy table is empty")
     if not cn_rows:
@@ -1086,20 +1124,36 @@ def build_poe_ninja_currency_prices(
     page_url: str,
     api_url: str,
     league: str,
+    item_api_url: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, PriceObservation]]:
-    source_url = poe_ninja_api_url_from_page(page_url, api_url, league)
-    data = client.get_json(source_url)
-    items_by_id = {item.get("id"): item for item in data.get("items") or []}
-    for item in (data.get("core") or {}).get("items") or []:
-        if item.get("id") not in items_by_id:
-            items_by_id[item.get("id")] = item
+    item_api_url = item_api_url or DEFAULT_POE_NINJA_ITEM_API_URL
+    source_specs = [
+        ("exchange", item_type, poe_ninja_api_url(api_url, league, item_type))
+        for item_type in POE_NINJA_EXCHANGE_TYPES
+    ] + [
+        ("item", item_type, poe_ninja_api_url(item_api_url, league, item_type))
+        for item_type in POE_NINJA_ITEM_TYPES
+    ]
+    if "?" in page_url and "/api/" in page_url:
+        source_specs = [("exchange", "Currency", page_url)]
 
-    core = data.get("core") or {}
+    payloads: dict[tuple[str, str], dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=min(8, len(source_specs))) as pool:
+        futures = {
+            pool.submit(client.get_json, source_url): (source_kind, item_type, source_url)
+            for source_kind, item_type, source_url in source_specs
+        }
+        for future in as_completed(futures):
+            source_kind, item_type, _source_url = futures[future]
+            payloads[(source_kind, item_type)] = future.result()
+
+    currency_data = payloads.get(("exchange", "Currency")) or {}
+    core = currency_data.get("core") or {}
     rates = core.get("rates") or {}
     divine_exalted = to_decimal(rates.get("exalted"))
     if divine_exalted <= 0:
         exalted_line = next(
-            (line for line in data.get("lines") or [] if line.get("id") == "exalted"),
+            (line for line in currency_data.get("lines") or [] if line.get("id") == "exalted"),
             None,
         )
         if exalted_line:
@@ -1127,35 +1181,76 @@ def build_poe_ninja_currency_prices(
             source_pair="poe.ninja/core/rates",
         ),
     }
-    for line in data.get("lines") or []:
-        api_id = str(line.get("id") or "").strip()
-        item = items_by_id.get(api_id) or {}
-        name = str(item.get("name") or "").strip()
-        if not api_id or not name:
-            continue
-        primary_value = to_decimal(line.get("primaryValue"))
-        if api_id == "divine":
-            price_exalted = divine_exalted
-        elif api_id == "exalted":
-            price_exalted = Decimal("1")
-        else:
-            price_exalted = primary_value * divine_exalted
-        if price_exalted <= 0:
-            continue
-        best[api_id] = PriceObservation(
-            api_id=api_id,
-            en_name=name,
-            category=str(item.get("category") or "currency"),
-            price_exalted=price_exalted,
-            value_traded=to_decimal(line.get("volumePrimaryValue")),
-            source_pair=f"poe.ninja/{name}; primary_value={primary_value}",
+
+    category_stats: list[dict[str, Any]] = []
+    for source_kind, item_type, source_url in source_specs:
+        data = payloads.get((source_kind, item_type)) or {}
+        lines = data.get("lines") or []
+        category_stats.append(
+            {
+                "kind": source_kind,
+                "type": item_type,
+                "url": source_url,
+                "lines": len(lines),
+                "items": len(data.get("items") or []),
+            }
         )
+        if source_kind == "exchange":
+            items_by_id = {item.get("id"): item for item in data.get("items") or []}
+            for item in (data.get("core") or {}).get("items") or []:
+                if item.get("id") not in items_by_id:
+                    items_by_id[item.get("id")] = item
+            for line in lines:
+                api_id = str(line.get("id") or "").strip()
+                item = items_by_id.get(api_id) or {}
+                name = str(item.get("name") or "").strip()
+                if not api_id or not name:
+                    continue
+                primary_value = to_decimal(line.get("primaryValue"))
+                if api_id == "divine":
+                    price_exalted = divine_exalted
+                elif api_id == "exalted":
+                    price_exalted = Decimal("1")
+                else:
+                    price_exalted = primary_value * divine_exalted
+                if price_exalted <= 0:
+                    continue
+                best[api_id] = PriceObservation(
+                    api_id=api_id,
+                    en_name=name,
+                    category=str(item.get("category") or item_type),
+                    price_exalted=price_exalted,
+                    value_traded=to_decimal(line.get("volumePrimaryValue")),
+                    source_pair=f"poe.ninja/{item_type}/{name}; primary_value={primary_value}",
+                )
+            continue
+
+        for line in lines:
+            details_id = str(line.get("detailsId") or line.get("itemId") or line.get("id") or "").strip()
+            name = str(line.get("name") or line.get("baseType") or "").strip()
+            if not details_id or not name:
+                continue
+            primary_value = to_decimal(line.get("primaryValue"))
+            price_exalted = primary_value * divine_exalted
+            if price_exalted <= 0:
+                continue
+            api_id = f"unique:{normalize_name(details_id)}"
+            best[api_id] = PriceObservation(
+                api_id=api_id,
+                en_name=name,
+                category=f"unique:{item_type}",
+                price_exalted=price_exalted,
+                value_traded=to_decimal(line.get("listingCount")),
+                source_pair=f"poe.ninja/{item_type}/{name}; primary_value={primary_value}",
+            )
 
     raw = {
         "source": "poe-ninja",
-        "url": source_url,
-        "items": len(data.get("items") or []),
-        "lines": len(data.get("lines") or []),
+        "url": poe_ninja_api_url_from_page(page_url, api_url, league),
+        "category_count": len(source_specs),
+        "category_stats": category_stats,
+        "items": sum(stat["items"] for stat in category_stats),
+        "lines": sum(stat["lines"] for stat in category_stats),
         "matched_rows": len(best),
         "divine_price_exalted": str(divine_exalted),
     }
@@ -1269,6 +1364,7 @@ def fetch_price_source(
             args.poe_ninja_currency_url,
             args.poe_ninja_api_url,
             args.poe_ninja_league,
+            args.poe_ninja_item_api_url,
         )
         return PriceSourceResult(source=source, raw=raw, prices=prices, status="ok")
     if source == "poe2db-economy":
@@ -1339,20 +1435,35 @@ def fetch_unique_category_items(
     category: str,
     per_page: int = 100,
 ) -> list[dict[str, Any]]:
-    query = urllib.parse.urlencode(
-        {
-            "Category": category,
-            "ReferenceCurrency": "exalted",
-            "Page": 1,
-            "PerPage": per_page,
-            "DataPoints": 7,
-            "FrequencyHours": 24,
-        }
-    )
-    data = client.get_json(
-        f"{api_base}/poe2/Leagues/{league}/Uniques/ByCategory?{query}"
-    )
-    return data.get("Items") or []
+    all_items: list[dict[str, Any]] = []
+    page = 1
+    while True:
+        query = urllib.parse.urlencode(
+            {
+                "Category": category,
+                "ReferenceCurrency": "exalted",
+                "Page": page,
+                "PerPage": per_page,
+                "DataPoints": 7,
+                "FrequencyHours": 24,
+            }
+        )
+        data = client.get_json(
+            f"{api_base}/poe2/Leagues/{league}/Uniques/ByCategory?{query}"
+        )
+        items = data.get("Items") or []
+        all_items.extend(items)
+
+        total_pages = int(data.get("Pages") or 1)
+        total_items = int(data.get("Total") or 0)
+        if page >= total_pages:
+            break
+        if total_items and len(all_items) >= total_items:
+            break
+        if not items:
+            break
+        page += 1
+    return all_items
 
 
 def fetch_unique_items(
@@ -2221,6 +2332,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--poecurrency-summary-url", default=DEFAULT_POECURRENCY_SUMMARY_API)
     parser.add_argument("--poe-ninja-currency-url", default=DEFAULT_POE_NINJA_CURRENCY_URL)
     parser.add_argument("--poe-ninja-api-url", default=DEFAULT_POE_NINJA_API_URL)
+    parser.add_argument("--poe-ninja-item-api-url", default=DEFAULT_POE_NINJA_ITEM_API_URL)
     parser.add_argument("--poe-ninja-league", default=DEFAULT_POE_NINJA_LEAGUE)
     parser.add_argument("--poe2db-economy-us-url", default=DEFAULT_POE2DB_ECONOMY_US_URL)
     parser.add_argument("--poe2db-economy-cn-url", default=DEFAULT_POE2DB_ECONOMY_CN_URL)

@@ -625,40 +625,129 @@ class PoecurrencyPricingTests(unittest.TestCase):
         self.assertEqual(best["poe2db:ritual-audience"].en_name, "CN Audience")
         self.assertEqual(best["poe2db:ritual-audience"].price_exalted, Decimal("1965"))
 
+    def test_poe2db_economy_prices_fail_when_category_page_is_missing(self):
+        nav = """
+        <nav>
+        <a href="Economy_Currency">Currency</a>
+        <a href="Economy_Fragments">Fragments</a>
+        </nav>
+        """
+        currency_html = nav + """
+        <table><tbody>
+        <tr><td><a href="Economy_divine">Divine Orb</a><a href="Divine_Orb" class="border p-1">Wiki</a></td>
+        <td>9.93 <a href="Economy_chaos"></a> 1 <a href="Economy_divine"></a></td><td></td><td>4,913,645</td></tr>
+        <tr><td><a href="Economy_exalted">Exalted Orb</a><a href="Exalted_Orb" class="border p-1">Wiki</a></td>
+        <td>1 <a href="Economy_divine"></a> 393 <a href="Economy_exalted"></a></td><td></td><td>542,073,655</td></tr>
+        </tbody></table>
+        """
+
+        class FakeClient:
+            def get(self, url):
+                if url in {"https://poe2db.tw/Economy", "https://poe2db.tw/cn/Economy"}:
+                    return type("Response", (), {"text": currency_html})()
+                raise RuntimeError("blocked")
+
+        with self.assertRaisesRegex(ValueError, "Economy_Fragments"):
+            self.price_patch.build_poe2db_economy_prices(
+                FakeClient(),
+                "https://poe2db.tw/Economy",
+                "https://poe2db.tw/cn/Economy",
+            )
+
     def test_parse_poe_ninja_currency_prices(self):
         class FakeClient:
             def get_json(self, url):
-                self.url = url
-                return {
-                    "core": {
-                        "items": [
-                            {"id": "divine", "name": "Divine Orb", "category": "Currency"},
-                            {"id": "exalted", "name": "Exalted Orb", "category": "Currency"},
+                self.urls.append(url)
+                if "type=Currency" in url:
+                    return {
+                        "core": {
+                            "items": [
+                                {"id": "divine", "name": "Divine Orb", "category": "Currency"},
+                                {"id": "exalted", "name": "Exalted Orb", "category": "Currency"},
+                            ],
+                            "rates": {"exalted": 400},
+                        },
+                        "lines": [
+                            {"id": "divine", "primaryValue": 1, "volumePrimaryValue": 100},
+                            {"id": "exalted", "primaryValue": 0.0025, "volumePrimaryValue": 100},
+                            {"id": "mirror", "primaryValue": 4500, "volumePrimaryValue": 2},
                         ],
-                        "rates": {"exalted": 400},
-                    },
-                    "lines": [
-                        {"id": "divine", "primaryValue": 1, "volumePrimaryValue": 100},
-                        {"id": "exalted", "primaryValue": 0.0025, "volumePrimaryValue": 100},
-                        {"id": "mirror", "primaryValue": 4500, "volumePrimaryValue": 2},
-                    ],
-                    "items": [
-                        {"id": "mirror", "name": "Mirror of Kalandra", "category": "Currency"}
-                    ],
-                }
+                        "items": [
+                            {"id": "mirror", "name": "Mirror of Kalandra", "category": "Currency"}
+                        ],
+                    }
+                if "type=Runes" in url:
+                    return {
+                        "core": {"items": [], "rates": {"exalted": 400}},
+                        "lines": [{"id": "adept-rune", "primaryValue": 0.01}],
+                        "items": [{"id": "adept-rune", "name": "Adept Rune", "category": "Runes"}],
+                    }
+                if "type=UniqueWeapons" in url:
+                    return {
+                        "core": {"rates": {"exalted": 400}},
+                        "lines": [
+                            {
+                                "detailsId": "bluetongue-shortsword",
+                                "name": "Bluetongue",
+                                "primaryValue": 2,
+                                "listingCount": 10,
+                            }
+                        ],
+                    }
+                raise AssertionError(f"unexpected URL: {url}")
 
-        raw, best = self.price_patch.build_poe_ninja_currency_prices(
-            FakeClient(),
-            "https://poe.ninja/poe2/economy/runesofaldur/currency",
-            "https://poe.ninja/poe2/api/economy/exchange/current/overview",
-            "Runes of Aldur",
-        )
+            def __init__(self):
+                self.urls: list[str] = []
+
+        client = FakeClient()
+        with patch.object(self.price_patch, "POE_NINJA_EXCHANGE_TYPES", ("Currency", "Runes")), patch.object(
+            self.price_patch, "POE_NINJA_ITEM_TYPES", ("UniqueWeapons",)
+        ):
+            raw, best = self.price_patch.build_poe_ninja_currency_prices(
+                client,
+                "https://poe.ninja/poe2/economy/runesofaldur/currency",
+                "https://poe.ninja/poe2/api/economy/exchange/current/overview",
+                "Runes of Aldur",
+                "https://poe.ninja/poe2/api/economy/stash/current/item/overview",
+            )
 
         self.assertEqual(raw["source"], "poe-ninja")
+        self.assertEqual(raw["category_count"], 3)
+        self.assertEqual(raw["lines"], 5)
         self.assertEqual(best["divine"].price_exalted, Decimal("400"))
         self.assertEqual(best["exalted"].price_exalted, Decimal("1"))
         self.assertEqual(best["mirror"].en_name, "Mirror of Kalandra")
         self.assertEqual(best["mirror"].price_exalted, Decimal("1800000"))
+        self.assertEqual(best["adept-rune"].price_exalted, Decimal("4.00"))
+        self.assertEqual(best["unique:bluetongueshortsword"].price_exalted, Decimal("800"))
+        self.assertTrue(any("type=Runes" in url for url in client.urls))
+        self.assertTrue(any("type=UniqueWeapons" in url for url in client.urls))
+
+    def test_fetch_unique_category_items_reads_all_pages(self):
+        class FakeClient:
+            def __init__(self):
+                self.urls: list[str] = []
+
+            def get_json(self, url):
+                self.urls.append(url)
+                if "&Page=1&" in url:
+                    return {"Items": [{"Name": "one"}], "Pages": 2, "Total": 2}
+                if "&Page=2&" in url:
+                    return {"Items": [{"Name": "two"}], "Pages": 2, "Total": 2}
+                raise AssertionError(f"unexpected URL: {url}")
+
+        client = FakeClient()
+        items = self.price_patch.fetch_unique_category_items(
+            client,
+            "https://api.poe2scout.com",
+            "runes",
+            "armour",
+            per_page=1,
+        )
+
+        self.assertEqual([item["Name"] for item in items], ["one", "two"])
+        self.assertTrue(any("Page=1" in url for url in client.urls))
+        self.assertTrue(any("Page=2" in url for url in client.urls))
 
     def test_poecurrency_cn_can_use_localized_baseitems_without_english_pairs(self):
         pairs = [
