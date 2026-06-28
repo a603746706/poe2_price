@@ -1010,9 +1010,7 @@ def fetch_poecurrency_summary(
     client: RetryingRequests, summary_url: str
 ) -> list[dict[str, Any]]:
     data = client.get_json(summary_url)
-    if not isinstance(data, list):
-        raise ValueError("poecurrency summary response must be a list")
-    return data
+    return normalize_poecurrency_summary(data)
 
 
 def fetch_unique_categories(
@@ -1090,6 +1088,15 @@ def normalize_market_name(value: str) -> str:
 CN_DIVINE_NORMALIZED = {normalize_market_name(name) for name in CN_DIVINE_NAMES}
 CN_EXALTED_NORMALIZED = {normalize_market_name(name) for name in CN_EXALTED_NAMES}
 
+POECURRENCY_CATEGORY_KEYS = ("category_label", "category", "label", "name")
+POECURRENCY_ITEMS_KEYS = ("items", "data", "list", "children")
+POECURRENCY_NAME_KEYS = ("item_name", "name", "itemName", "item")
+POECURRENCY_LATEST_BUY_KEYS = ("latest_buy1", "latest_buy", "buy1", "buy_price")
+POECURRENCY_LATEST_SELL_KEYS = ("latest_sell1", "latest_sell", "sell1", "sell_price")
+POECURRENCY_AVG_BUY_KEYS = ("buy_avg", "avg_buy", "buyAverage", "buy")
+POECURRENCY_AVG_SELL_KEYS = ("sell_avg", "avg_sell", "sellAverage", "sell")
+POECURRENCY_PREV_BUY_KEYS = ("prev_buy1", "previous_buy1", "prev_buy")
+
 
 def poecurrency_api_id(name: str) -> str:
     normalized = normalize_market_name(name)
@@ -1098,6 +1105,55 @@ def poecurrency_api_id(name: str) -> str:
     if normalized in CN_EXALTED_NORMALIZED:
         return "exalted"
     return f"cn:{normalized}"
+
+
+def first_present(mapping: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = mapping.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def normalize_poecurrency_summary(data: Any) -> list[dict[str, Any]]:
+    if isinstance(data, dict):
+        categories = first_present(data, ("value", "data", "items", "list", "result"))
+    else:
+        categories = data
+    if not isinstance(categories, list):
+        raise ValueError("poecurrency summary response must contain a category list")
+
+    normalized: list[dict[str, Any]] = []
+    for category in categories:
+        if not isinstance(category, dict):
+            continue
+        label = str(first_present(category, POECURRENCY_CATEGORY_KEYS) or "").strip()
+        items = first_present(category, POECURRENCY_ITEMS_KEYS) or []
+        if not isinstance(items, list):
+            continue
+
+        normalized_items: list[dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            normalized_item = dict(item)
+            name = str(first_present(item, POECURRENCY_NAME_KEYS) or "").strip()
+            if name:
+                normalized_item["item_name"] = name
+            for target, keys in (
+                ("latest_buy1", POECURRENCY_LATEST_BUY_KEYS),
+                ("latest_sell1", POECURRENCY_LATEST_SELL_KEYS),
+                ("buy_avg", POECURRENCY_AVG_BUY_KEYS),
+                ("sell_avg", POECURRENCY_AVG_SELL_KEYS),
+                ("prev_buy1", POECURRENCY_PREV_BUY_KEYS),
+            ):
+                value = first_present(item, keys)
+                if value is not None:
+                    normalized_item[target] = value
+            normalized_items.append(normalized_item)
+
+        normalized.append({"category_label": label, "items": normalized_items})
+    return normalized
 
 
 def poecurrency_item_unit(item: dict[str, Any]) -> str:
@@ -1148,15 +1204,91 @@ def choose_poecurrency_pair_price(
     return Decimal("0"), ""
 
 
-def poecurrency_item_price(item: dict[str, Any]) -> tuple[Decimal, str]:
-    latest_buy = to_decimal(item.get("latest_buy1"))
-    latest_sell = to_decimal(item.get("latest_sell1"))
-    latest_price, latest_field = choose_poecurrency_pair_price(
-        latest_buy, latest_sell, "latest_buy1", "latest_sell1"
+def choose_poecurrency_pair_price_with_reference(
+    buy_price: Decimal,
+    sell_price: Decimal,
+    buy_field: str,
+    sell_field: str,
+    reference_price: Decimal,
+    reference_field: str,
+) -> tuple[Decimal, str]:
+    if buy_price > 0 and sell_price > 0:
+        ratio = decimal_spread_ratio(buy_price, sell_price)
+        if ratio > CN_TRUSTED_BUY_SELL_RATIO and reference_price > 0:
+            price, field = closest_positive_to_reference(
+                reference_price,
+                [(buy_price, buy_field), (sell_price, sell_field)],
+            )
+            if decimal_spread_ratio(price, reference_price) <= CN_TRUSTED_BUY_SELL_RATIO:
+                return price, f"{field}_closest_to_{reference_field}_spread_gt_5x"
+            if reference_field.startswith("geo_"):
+                return reference_price, f"{reference_field}_latest_spread_avg_fallback"
+    return choose_poecurrency_pair_price(
+        buy_price, sell_price, buy_field, sell_field
     )
-    if latest_price > 0:
-        return latest_price, latest_field
 
+
+def decimal_has_fraction(value: Decimal) -> bool:
+    return value > 0 and value != value.to_integral_value()
+
+
+def poecurrency_digit_shifted_divine_pair_price(
+    buy_price: Decimal,
+    sell_price: Decimal,
+    buy_field: str,
+    sell_field: str,
+) -> tuple[Decimal, str]:
+    if buy_price <= 0 or sell_price <= 0:
+        return Decimal("0"), ""
+    high_price = max(buy_price, sell_price)
+    low_price = min(buy_price, sell_price)
+    if not decimal_has_fraction(low_price):
+        return Decimal("0"), ""
+    ratio = decimal_spread_ratio(high_price, low_price)
+    if ratio < Decimal("20") or ratio > Decimal("200"):
+        return Decimal("0"), ""
+    if high_price < Decimal("50") or high_price > Decimal("1000"):
+        return Decimal("0"), ""
+
+    scaled_high = high_price / Decimal("100")
+    if decimal_spread_ratio(low_price, scaled_high) > CN_TRUSTED_BUY_SELL_RATIO:
+        return Decimal("0"), ""
+
+    high_field = buy_field if buy_price >= sell_price else sell_field
+    low_field = sell_field if buy_price >= sell_price else buy_field
+    return (
+        (low_price * scaled_high).sqrt(),
+        f"geo_{low_field}_{high_field}_d_digit_shift_100x",
+    )
+
+
+def poecurrency_item_has_error(item: dict[str, Any]) -> bool:
+    raw_error = item.get("error")
+    if isinstance(raw_error, bool):
+        return raw_error
+    if str(raw_error).strip().lower() in {"1", "true", "yes"}:
+        return True
+    return bool(str(item.get("error_info") or "").strip())
+
+
+def decimal_spread_ratio(left: Decimal, right: Decimal) -> Decimal:
+    if left <= 0 or right <= 0:
+        return Decimal("0")
+    return max(left, right) / min(left, right)
+
+
+def closest_positive_to_reference(
+    reference: Decimal, candidates: list[tuple[Decimal, str]]
+) -> tuple[Decimal, str]:
+    positive = [(price, field) for price, field in candidates if price > 0]
+    if not positive:
+        return Decimal("0"), ""
+    if reference <= 0:
+        return max(positive, key=lambda item: item[0])
+    return min(positive, key=lambda item: decimal_spread_ratio(item[0], reference))
+
+
+def poecurrency_avg_price(item: dict[str, Any]) -> tuple[Decimal, str]:
     buy_avg = to_decimal(item.get("buy_avg"))
     sell_avg = to_decimal(item.get("sell_avg"))
     return choose_poecurrency_pair_price(
@@ -1164,11 +1296,87 @@ def poecurrency_item_price(item: dict[str, Any]) -> tuple[Decimal, str]:
     )
 
 
+def poecurrency_item_price(item: dict[str, Any]) -> tuple[Decimal, str]:
+    avg_price, avg_field = poecurrency_avg_price(item)
+    unit = poecurrency_item_unit(item)
+    latest_buy = to_decimal(item.get("latest_buy1"))
+    latest_sell = to_decimal(item.get("latest_sell1"))
+    if unit == "d":
+        shifted_price, shifted_field = poecurrency_digit_shifted_divine_pair_price(
+            latest_buy, latest_sell, "latest_buy1", "latest_sell1"
+        )
+        if shifted_price > 0:
+            return shifted_price, shifted_field
+        latest_price, latest_field = choose_poecurrency_pair_price(
+            latest_buy, latest_sell, "latest_buy1", "latest_sell1"
+        )
+        if latest_price > 0 and not latest_field.endswith("spread_gt_5x"):
+            return latest_price, latest_field
+
+    if poecurrency_item_has_error(item):
+        if avg_price > 0:
+            return avg_price, f"{avg_field}_error_fallback"
+        prev_buy = to_decimal(item.get("prev_buy1"))
+        if prev_buy > 0:
+            return prev_buy, "prev_buy1_error_fallback"
+
+    latest_price, latest_field = choose_poecurrency_pair_price_with_reference(
+        latest_buy,
+        latest_sell,
+        "latest_buy1",
+        "latest_sell1",
+        avg_price,
+        avg_field,
+    )
+    if latest_price > 0:
+        return latest_price, latest_field
+
+    return avg_price, avg_field
+
+
 def poecurrency_divine_price(item: dict[str, Any]) -> tuple[Decimal, str]:
-    for field_name in ("latest_buy1", "buy_avg", "latest_sell1", "sell_avg"):
-        price = to_decimal(item.get(field_name))
+    latest_buy = to_decimal(item.get("latest_buy1"))
+    latest_sell = to_decimal(item.get("latest_sell1"))
+    buy_avg = to_decimal(item.get("buy_avg"))
+    sell_avg = to_decimal(item.get("sell_avg"))
+    stable_avg, stable_avg_field = (
+        (buy_avg, "buy_avg")
+        if buy_avg > 0
+        else (sell_avg, "sell_avg")
+    )
+
+    if poecurrency_item_has_error(item):
+        if stable_avg > 0:
+            return stable_avg, f"{stable_avg_field}_divine_error_fallback"
+        prev_buy = to_decimal(item.get("prev_buy1"))
+        if prev_buy > 0:
+            return prev_buy, "prev_buy1_divine_error_fallback"
+
+    if (
+        latest_buy > 0
+        and latest_sell > 0
+        and decimal_spread_ratio(latest_buy, latest_sell) > CN_TRUSTED_BUY_SELL_RATIO
+    ):
+        price, field = closest_positive_to_reference(
+            stable_avg,
+            [(latest_buy, "latest_buy1"), (latest_sell, "latest_sell1")],
+        )
         if price > 0:
-            return price, f"{field_name}_divine_ratio"
+            return price, f"{field}_divine_spread_fallback"
+
+    if (
+        latest_buy > 0
+        and stable_avg > 0
+        and decimal_spread_ratio(latest_buy, stable_avg) > CN_TRUSTED_BUY_SELL_RATIO
+    ):
+        return stable_avg, f"{stable_avg_field}_divine_latest_outlier_fallback"
+
+    if latest_buy > 0:
+        return latest_buy, "latest_buy1_divine_ratio"
+    if latest_sell > 0:
+        return latest_sell, "latest_sell1_divine_ratio"
+    if stable_avg > 0:
+        return stable_avg, f"{stable_avg_field}_divine_ratio"
     return Decimal("0"), ""
 
 
@@ -1185,14 +1393,12 @@ def poecurrency_price_to_exalted(
 
 
 def collect_poecurrency_observations(
-    summary: list[dict[str, Any]],
+    summary: Any,
 ) -> dict[str, PriceObservation]:
     candidates: list[dict[str, Any]] = []
     divine_exalted = Decimal("0")
 
-    for category in summary:
-        if not isinstance(category, dict):
-            continue
+    for category in normalize_poecurrency_summary(summary):
         category_label = str(category.get("category_label") or "").strip()
         items = category.get("items") or []
         if not isinstance(items, list):

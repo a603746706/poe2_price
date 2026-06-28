@@ -68,8 +68,180 @@ class PoecurrencyPricingTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(price, Decimal("9"))
-        self.assertEqual(field, "latest_sell1_conservative_spread_gt_5x")
+        self.assertEqual(price, Decimal("73"))
+        self.assertEqual(field, "latest_buy1_closest_to_geo_buy_avg_sell_avg_spread_gt_5x")
+
+    def test_latest_spread_uses_average_reference_when_available(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 56.808571428571426,
+                "sell_avg": 30.705238095238094,
+                "latest_buy1": 2.6,
+                "latest_sell1": 242,
+                "currency_unit": "d",
+            }
+        )
+
+        self.assertEqual(price.quantize(Decimal("0.0001")), Decimal("2.5084"))
+        self.assertEqual(field, "geo_latest_buy1_latest_sell1_d_digit_shift_100x")
+
+    def test_latest_spread_falls_back_to_average_when_both_sides_are_far(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 56.808571428571426,
+                "sell_avg": 30.705238095238094,
+                "latest_buy1": 2.6,
+                "latest_sell1": 2400,
+                "currency_unit": "d",
+            }
+        )
+
+        self.assertEqual(price.quantize(Decimal("0.0001")), Decimal("41.7651"))
+        self.assertEqual(field, "geo_buy_avg_sell_avg_latest_spread_avg_fallback")
+
+    def test_poecurrency_summary_accepts_wrapped_response_and_field_aliases(self):
+        class FakeClient:
+            def get_json(self, _url):
+                return {
+                    "value": [
+                        {
+                            "name": "通货仓库",
+                            "data": [
+                                {
+                                    "name": "神圣石",
+                                    "latest_buy": 300,
+                                    "latest_sell": 295,
+                                    "unit": "e",
+                                }
+                            ],
+                        }
+                    ],
+                    "Count": 1,
+                }
+
+        summary = self.price_patch.fetch_poecurrency_summary(
+            FakeClient(), "https://example.invalid/summary"
+        )
+
+        self.assertEqual(summary[0]["category_label"], "通货仓库")
+        self.assertEqual(summary[0]["items"][0]["item_name"], "神圣石")
+        self.assertEqual(summary[0]["items"][0]["latest_buy1"], 300)
+        self.assertEqual(summary[0]["items"][0]["latest_sell1"], 295)
+
+    def test_collect_observations_accepts_wrapped_response(self):
+        best = self.price_patch.collect_poecurrency_observations(
+            {
+                "value": [
+                    {
+                        "name": "通货仓库",
+                        "data": [
+                            {
+                                "name": "神圣石",
+                                "latest_buy": 300,
+                                "unit": "e",
+                            },
+                            {
+                                "name": "测试物品",
+                                "latest_buy": 2,
+                                "unit": "d",
+                            },
+                        ],
+                    }
+                ],
+                "Count": 1,
+            }
+        )
+
+        row = best[self.price_patch.poecurrency_api_id("测试物品")]
+        self.assertEqual(row.price_exalted, Decimal("600"))
+        self.assertIn("d_to_e@300", row.source_pair)
+
+    def test_error_flag_uses_average_before_realtime_quotes(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 54,
+                "sell_avg": 13,
+                "latest_buy1": 2,
+                "latest_sell1": 1,
+                "prev_buy1": 247,
+                "error": True,
+                "error_info": "价格出现剧烈波动, 可能为OCR识别故障",
+            }
+        )
+
+        self.assertEqual(price.quantize(Decimal("0.0001")), Decimal("26.4953"))
+        self.assertEqual(field, "geo_buy_avg_sell_avg_error_fallback")
+
+    def test_error_flag_falls_back_to_average(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 80,
+                "sell_avg": 60,
+                "latest_buy1": 1,
+                "latest_sell1": 1,
+                "error": True,
+            }
+        )
+
+        self.assertEqual(price.quantize(Decimal("0.0001")), Decimal("69.2820"))
+        self.assertEqual(field, "geo_buy_avg_sell_avg_error_fallback")
+
+    def test_error_flag_falls_back_to_previous_buy_only_without_average(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 0,
+                "sell_avg": 0,
+                "latest_buy1": 2.3,
+                "latest_sell1": 225,
+                "prev_buy1": 240,
+                "error": True,
+            }
+        )
+
+        self.assertEqual(price, Decimal("240"))
+        self.assertEqual(field, "prev_buy1_error_fallback")
+
+    def test_nightmare_simulacrum_ocr_error_does_not_use_prev_buy(self):
+        best = self.price_patch.collect_poecurrency_observations(
+            [
+                {
+                    "category_label": "通货仓库",
+                    "items": [
+                        {
+                            "item_name": "神圣石",
+                            "latest_buy1": 316,
+                            "latest_sell1": 314,
+                            "currency_unit": "e",
+                        }
+                    ],
+                },
+                {
+                    "category_label": "梦魇拟像",
+                    "items": [
+                        {
+                            "item_name": "梦魇拟像",
+                            "buy_avg": 38.84230769230769,
+                            "sell_avg": 34.817692307692305,
+                            "latest_buy1": 2.3,
+                            "latest_sell1": 225,
+                            "prev_buy1": 240,
+                            "error": True,
+                            "error_info": "价格出现剧烈波动, 可能为OCR识别故障",
+                            "currency_unit": "d",
+                        }
+                    ],
+                },
+            ]
+        )
+
+        divine = self.price_patch.divine_price_exalted(best)
+        self.price_patch.apply_display_prices(best, divine)
+        row = best[self.price_patch.poecurrency_api_id("梦魇拟像")]
+
+        self.assertEqual(divine, Decimal("316"))
+        self.assertEqual(row.display_price, "2.27D")
+        self.assertIn("d_digit_shift_100x", row.source_pair)
+        self.assertNotIn("prev_buy1", row.source_pair)
 
     def test_divine_ratio_uses_latest_buy1(self):
         price, field = self.price_patch.poecurrency_divine_price(
@@ -84,6 +256,98 @@ class PoecurrencyPricingTests(unittest.TestCase):
 
         self.assertEqual(price, Decimal("279"))
         self.assertEqual(field, "latest_buy1_divine_ratio")
+
+    def test_divine_ratio_falls_back_when_latest_buy_is_ocr_outlier(self):
+        price, field = self.price_patch.poecurrency_divine_price(
+            {
+                "item_name": "神圣石",
+                "buy_avg": 316,
+                "sell_avg": 314,
+                "latest_buy1": 31.6,
+                "latest_sell1": 314,
+                "prev_buy1": 322,
+                "currency_unit": "e",
+            }
+        )
+
+        self.assertEqual(price, Decimal("314"))
+        self.assertEqual(field, "latest_sell1_divine_spread_fallback")
+
+    def test_divine_ratio_uses_average_when_latest_buy_outlier_has_no_sell(self):
+        price, field = self.price_patch.poecurrency_divine_price(
+            {
+                "item_name": "神圣石",
+                "buy_avg": 316,
+                "sell_avg": 314,
+                "latest_buy1": 31.6,
+                "latest_sell1": 0,
+                "currency_unit": "e",
+            }
+        )
+
+        self.assertEqual(price, Decimal("316"))
+        self.assertEqual(field, "buy_avg_divine_latest_outlier_fallback")
+
+    def test_stale_error_can_still_extract_average_price(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 12,
+                "sell_avg": 10,
+                "latest_buy1": 0,
+                "latest_sell1": 0,
+                "error": True,
+                "error_info": "数据已过时超过24h",
+                "currency_unit": "e",
+            }
+        )
+
+        self.assertEqual(price.quantize(Decimal("0.0001")), Decimal("10.9545"))
+        self.assertEqual(field, "geo_buy_avg_sell_avg_error_fallback")
+
+    def test_ocr_error_without_average_can_still_extract_previous_buy(self):
+        price, field = self.price_patch.poecurrency_item_price(
+            {
+                "buy_avg": 0,
+                "sell_avg": 0,
+                "latest_buy1": 0,
+                "latest_sell1": 0,
+                "prev_buy1": 8,
+                "error": True,
+                "error_info": "价格出现剧烈波动, 可能为OCR识别故障",
+                "currency_unit": "e",
+            }
+        )
+
+        self.assertEqual(price, Decimal("8"))
+        self.assertEqual(field, "prev_buy1_error_fallback")
+
+    def test_ocr_error_without_any_price_is_skipped(self):
+        best = self.price_patch.collect_poecurrency_observations(
+            [
+                {
+                    "category_label": "通货仓库",
+                    "items": [
+                        {
+                            "item_name": "神圣石",
+                            "latest_buy1": 316,
+                            "currency_unit": "e",
+                        },
+                        {
+                            "item_name": "空价格测试",
+                            "buy_avg": 0,
+                            "sell_avg": 0,
+                            "latest_buy1": 0,
+                            "latest_sell1": 0,
+                            "prev_buy1": 0,
+                            "error": True,
+                            "currency_unit": "e",
+                        },
+                    ],
+                }
+            ]
+        )
+
+        self.assertNotIn(self.price_patch.poecurrency_api_id("空价格测试"), best)
 
     def test_currency_unit_d_is_converted_to_exalted(self):
         best = self.price_patch.collect_poecurrency_observations(
