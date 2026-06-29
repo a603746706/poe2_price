@@ -708,26 +708,28 @@ function Invoke-Poe2Python {
 
     Set-Poe2PythonEnvironment
     $OldErrorActionPreference = $ErrorActionPreference
+    $Lines = New-Object System.Collections.Generic.List[string]
     try {
         $ErrorActionPreference = "Continue"
-        $Output = & $Python @ArgumentList 2>&1
+        & $Python @ArgumentList 2>&1 | ForEach-Object {
+            $Line = [string]$_
+            $Lines.Add($Line)
+            if (-not $Quiet) {
+                Write-Host $Line
+            }
+        }
         $ExitCode = $LASTEXITCODE
     }
     finally {
         $ErrorActionPreference = $OldErrorActionPreference
     }
 
-    $Lines = @($Output | ForEach-Object { [string]$_ })
-    if (-not $Quiet) {
-        foreach ($Line in $Lines) {
-            Write-Host $Line
-        }
-    }
+    $LineArray = @($Lines.ToArray())
 
     return [pscustomobject]@{
         ExitCode = $ExitCode
-        Lines    = $Lines
-        Text     = ($Lines -join "`n")
+        Lines    = $LineArray
+        Text     = ($LineArray -join "`n")
     }
 }
 

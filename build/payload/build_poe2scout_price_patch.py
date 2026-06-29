@@ -35,6 +35,17 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+def progress(message: str) -> None:
+    print(f"[进度] {message}", flush=True)
+
+
+def compact_text(value: Any, limit: int = 140) -> str:
+    text = str(value)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
 DEFAULT_SCOUT_API = "https://api.poe2scout.com"
 DEFAULT_POECURRENCY_SUMMARY_API = "https://poecurrency.top/api/summary?version=2"
 DEFAULT_POE_NINJA_CURRENCY_URL = "https://poe.ninja/poe2/economy/runesofaldur/currency"
@@ -285,7 +296,15 @@ class RetryingRequests:
             except Exception as exc:
                 last_error = exc
             if attempt < self.max_retries:
-                time.sleep(self.backoff * (2**attempt))
+                delay = self.backoff * (2**attempt)
+                print(
+                    "[进度] 请求失败，"
+                    f"{delay:.1f}s 后重试 {attempt + 1}/{self.max_retries}: "
+                    f"{compact_text(url)} ({compact_text(last_error)})",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
         assert last_error is not None
         raise last_error
 
@@ -999,6 +1018,7 @@ def poe2db_row_price_exalted(row: Poe2dbEconomyRow, divine_exalted: Decimal) -> 
 def build_poe2db_economy_prices(
     client: RetryingRequests, us_url: str, cn_url: str
 ) -> tuple[dict[str, Any], dict[str, PriceObservation]]:
+    progress("Poe2DB Economy：读取分类入口页")
     us_html = client.get(us_url).text
     cn_html = client.get(cn_url).text
     us_initial_pages = poe2db_economy_initial_pages(us_url)
@@ -1009,6 +1029,7 @@ def build_poe2db_economy_prices(
             category_pages.append(page)
     if not category_pages:
         category_pages = [poe2db_economy_page_name(us_url) or "Economy"]
+    progress(f"Poe2DB Economy：发现 {len(category_pages)} 个分类页，开始抓取")
 
     us_rows: dict[str, Poe2dbEconomyRow] = {}
     cn_rows: dict[str, Poe2dbEconomyRow] = {}
@@ -1057,8 +1078,20 @@ def build_poe2db_economy_prices(
 
     with ThreadPoolExecutor(max_workers=min(6, max(1, len(category_pages)))) as pool:
         futures = {pool.submit(fetch_category, page): page for page in category_pages}
+        completed = 0
         for future in as_completed(futures):
-            page_results[futures[future]] = future.result()
+            page = futures[future]
+            page_results[page] = future.result()
+            completed += 1
+            _page_us_rows, _page_cn_rows, stat = page_results[page]
+            if stat.get("status") == "ok":
+                progress(
+                    "Poe2DB Economy："
+                    f"{completed}/{len(category_pages)} {page} 完成 "
+                    f"(国际 {stat.get('us_rows', 0)}，国服 {stat.get('cn_rows', 0)})"
+                )
+            else:
+                progress(f"Poe2DB Economy：{completed}/{len(category_pages)} {page} 失败")
 
     page_stats: list[dict[str, Any]] = []
     for page in category_pages:
@@ -1137,15 +1170,20 @@ def build_poe_ninja_currency_prices(
     if "?" in page_url and "/api/" in page_url:
         source_specs = [("exchange", "Currency", page_url)]
 
+    progress(f"poe.ninja：开始抓取 {len(source_specs)} 个分类")
     payloads: dict[tuple[str, str], dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=min(8, len(source_specs))) as pool:
         futures = {
             pool.submit(client.get_json, source_url): (source_kind, item_type, source_url)
             for source_kind, item_type, source_url in source_specs
         }
+        completed = 0
         for future in as_completed(futures):
             source_kind, item_type, _source_url = futures[future]
             payloads[(source_kind, item_type)] = future.result()
+            completed += 1
+            lines = len((payloads[(source_kind, item_type)] or {}).get("lines") or [])
+            progress(f"poe.ninja：{completed}/{len(source_specs)} {item_type} 完成 ({lines} 条)")
 
     currency_data = payloads.get(("exchange", "Currency")) or {}
     core = currency_data.get("core") or {}
@@ -1263,14 +1301,23 @@ def fetch_scout_data(client: RetryingRequests, api_base: str, league: str) -> di
         "reference_currencies": f"{api_base}/poe2/Leagues/{league}/ReferenceCurrencies",
         "snapshot_pairs": f"{api_base}/poe2/Leagues/{league}/SnapshotPairs",
     }
+    labels = {
+        "exchange_snapshot": "市场快照",
+        "reference_currencies": "参考通货",
+        "snapshot_pairs": "全量价格对",
+    }
+    progress("poe2scout：开始抓取主价格接口")
     results: dict[str, Any] = {}
     with ThreadPoolExecutor(max_workers=3) as pool:
         future_to_name = {
             pool.submit(client.get_json, url): name for name, url in endpoints.items()
         }
+        completed = 0
         for future in as_completed(future_to_name):
             name = future_to_name[future]
             results[name] = future.result()
+            completed += 1
+            progress(f"poe2scout：{completed}/{len(endpoints)} {labels.get(name, name)} 完成")
     return results
 
 
@@ -1287,8 +1334,10 @@ def build_scout_prices(
     list[dict[str, Any]],
 ]:
     scout = fetch_scout_data(client, api_base, league)
+    progress("poe2scout：整理价格对")
     observations = collect_price_observations(scout["snapshot_pairs"])
     best = choose_best_prices(observations, scout["reference_currencies"])
+    progress(f"poe2scout：已整理 {len(best)} 条基础价格")
     unique_categories: list[dict[str, Any]] = []
     unique_items: list[dict[str, Any]] = []
     if include_uniques:
@@ -1385,8 +1434,11 @@ def try_fetch_price_source(
     out_dir: Path,
     primary: bool = False,
 ) -> PriceSourceResult:
+    progress(f"价格源 {price_source_label(source)}：开始获取")
     try:
         result = fetch_price_source(source, client, args, include_uniques)
+        price_count = len(result.prices or {})
+        progress(f"价格源 {price_source_label(source)}：获取成功 ({price_count} 条价格)")
         if result.raw is not None:
             (out_dir / fallback_raw_filename(source, primary=primary)).write_text(
                 json.dumps(result.raw, ensure_ascii=False, indent=2),
@@ -1398,6 +1450,7 @@ def try_fetch_price_source(
             f"price source {source} failed; "
             f"{type(exc).__name__}: {exc}"
         )
+        progress(f"价格源 {price_source_label(source)}：获取失败，准备尝试下一个可用数据源")
         print(f"warning: {warning}", file=sys.stderr)
         (out_dir / fallback_error_filename(source, primary=primary)).write_text(
             json.dumps(
@@ -1435,6 +1488,7 @@ def fetch_unique_category_items(
     category: str,
     per_page: int = 100,
 ) -> list[dict[str, Any]]:
+    progress(f"poe2scout：开始抓传奇分类 {category}")
     all_items: list[dict[str, Any]] = []
     page = 1
     while True:
@@ -1456,6 +1510,10 @@ def fetch_unique_category_items(
 
         total_pages = int(data.get("Pages") or 1)
         total_items = int(data.get("Total") or 0)
+        progress(
+            f"poe2scout：传奇分类 {category} 第 {page}/{total_pages} 页完成 "
+            f"(累计 {len(all_items)}/{total_items or '?'})"
+        )
         if page >= total_pages:
             break
         if total_items and len(all_items) >= total_items:
@@ -1477,6 +1535,7 @@ def fetch_unique_items(
         for category in fetch_unique_categories(client, api_base, league)
         if category.get("ApiId") in DEFAULT_UNIQUE_CATEGORIES
     ]
+    progress(f"poe2scout：发现 {len(categories)} 个传奇装备分类")
     all_items: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
         future_to_category = {
@@ -1490,8 +1549,17 @@ def fetch_unique_items(
             for category in categories
             if category.get("ApiId")
         }
+        completed = 0
         for future in as_completed(future_to_category):
-            all_items.extend(future.result())
+            category = future_to_category[future]
+            items = future.result()
+            all_items.extend(items)
+            completed += 1
+            progress(
+                "poe2scout："
+                f"{completed}/{len(future_to_category)} 传奇分类 {category.get('ApiId')} 完成 "
+                f"({len(items)} 件)"
+            )
     return categories, all_items
 
 
@@ -2325,6 +2393,7 @@ def run_patch_builder(
     patched_dat: Path | None,
     game_path: str | None,
 ) -> None:
+    progress("生成 BaseItemTypes 价格补丁包")
     cmd = [
         sys.executable,
         str(patch_script),
@@ -2346,6 +2415,7 @@ def run_patch_builder(
     if patched_dat:
         cmd.extend(["--patched-dat", str(patched_dat)])
     subprocess.run(cmd, check=True)
+    progress("BaseItemTypes 价格补丁包生成完成")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -2495,12 +2565,24 @@ def main(argv: list[str]) -> int:
         backoff=args.backoff,
         timeout=max(1.0, args.timeout),
     )
+    fallback_labels = ", ".join(
+        price_source_label(source) for source in fallback_price_sources
+    ) or "none"
+    progress(
+        "启动价格构建："
+        f"scope={args.patch_scope}, 主源={price_source_label(args.price_source)}, "
+        f"备用源={fallback_labels}"
+    )
     if not fetch_prices:
         base_pairs = []
     elif args.price_source == "poecurrency-cn" and not args.en_baseitems.exists():
+        progress("加载本地国服 BaseItemTypes")
         base_pairs = load_localized_base_item_pairs(args.tc_baseitems)
     else:
+        progress("加载本地中英文 BaseItemTypes")
         base_pairs = load_base_item_pairs(args.en_baseitems, args.tc_baseitems)
+    if fetch_prices:
+        progress(f"本地可匹配条目：{len(base_pairs)} 条")
     unique_categories: list[dict[str, Any]] = []
     unique_items: list[dict[str, Any]] = []
     source_snapshot_epoch: Any = None
@@ -2531,11 +2613,13 @@ def main(argv: list[str]) -> int:
         source_base_currency = "disabled"
     elif args.price_source == "poecurrency-cn":
         try:
+            progress("国服主数据源 poecurrency.top：开始获取")
             summary_data = fetch_poecurrency_summary(client, args.poecurrency_summary_url)
             (args.out_dir / "poecurrency_cn_raw.json").write_text(
                 json.dumps(summary_data, ensure_ascii=False, indent=2), encoding="utf-8"
             )
             best = collect_poecurrency_observations(summary_data)
+            progress(f"国服主数据源 poecurrency.top：获取成功 ({len(best)} 条价格)")
             source_base_currency = "崇高石"
             source_item_count = sum(
                 len(category.get("items") or [])
@@ -2548,6 +2632,7 @@ def main(argv: list[str]) -> int:
                 "primary price source poecurrency-cn failed; "
                 f"trying fallback sources: {type(exc).__name__}: {exc}"
             )
+            progress("国服主数据源 poecurrency.top：获取失败，准备尝试国际参考源")
             print(f"warning: {primary_source_warning}", file=sys.stderr)
             (args.out_dir / "poecurrency_cn_error.json").write_text(
                 json.dumps(
@@ -2627,15 +2712,21 @@ def main(argv: list[str]) -> int:
                     preferred_results.append(result)
 
         if preferred_results:
+            progress(
+                "国际服价格源：开始合并 "
+                + ", ".join(price_source_label(result.source) for result in preferred_results)
+            )
             best = merge_price_source_results(preferred_results)
             source_base_currency = "+".join(
                 price_source_label(result.source) for result in preferred_results
             )
             source_item_count = len(best)
             merged_price_sources = {result.source for result in preferred_results}
+            progress(f"国际服价格源：合并后 {len(best)} 条价格")
 
     if fetch_prices:
         if best:
+            progress("整理展示价格并匹配本地物品")
             divine_exalted = divine_price_exalted(best)
             apply_display_prices(best, divine_exalted)
             if args.price_source == "poecurrency-cn":
@@ -2648,6 +2739,7 @@ def main(argv: list[str]) -> int:
                     use_poe2db=args.poe2db_fallback,
                     max_workers=max(1, args.max_workers),
                 )
+            progress(f"本地物品匹配完成：命中 {len(rows)}，缺失 {len(missing)}")
 
         for result in fallback_results:
             if result.source in merged_price_sources:
@@ -2655,6 +2747,7 @@ def main(argv: list[str]) -> int:
             if not result.prices:
                 continue
             try:
+                progress(f"备用结果 {price_source_label(result.source)}：开始匹配补缺")
                 fallback_divine = divine_price_exalted(result.prices)
                 apply_display_prices(result.prices, fallback_divine)
                 fallback_divine_by_source[result.source] = fallback_divine
@@ -2684,6 +2777,10 @@ def main(argv: list[str]) -> int:
                         )
                 fallback_missing_by_source[result.source] = len(fallback_missing)
                 fallback_rows_by_source.append((result.source, fallback_rows))
+                progress(
+                    f"备用结果 {price_source_label(result.source)}："
+                    f"命中 {len(fallback_rows)}，缺失 {len(fallback_missing)}"
+                )
                 if not best:
                     best = result.prices
                     divine_exalted = fallback_divine
@@ -2757,6 +2854,7 @@ def main(argv: list[str]) -> int:
     missing_csv = args.out_dir / "missing_prices.csv"
     unique_words_csv = args.out_dir / "unique_word_prices_detail.csv"
     unique_words_missing_csv = args.out_dir / "missing_unique_word_prices.csv"
+    progress("写出价格明细 CSV")
     write_csv(prices_csv, rows, ["metadata_path", "name", "price", "new_name"])
     write_csv(
         matched_csv,
@@ -2861,6 +2959,7 @@ def main(argv: list[str]) -> int:
             )
         if can_patch_unique_words:
             if words_game_path:
+                progress("处理传奇装备 Words 价格标记")
                 patched_words = args.patched_words or (args.out_dir / "words.patched.datc64")
                 if args.unique_price_label_mode in {"markup", "overlay", "newline"}:
                     if args.price_source == "poecurrency-cn":
@@ -2889,12 +2988,14 @@ def main(argv: list[str]) -> int:
                         row.get("status") == "cleaned" for row in unique_word_rows
                     )
                     if unique_words_dat_changed:
+                        progress(f"写入传奇装备 Words 补丁 ({unique_words_patched} 条)")
                         upsert_zip_entry(
                             output_zip,
                             words_game_path,
                             patched_words.read_bytes(),
                         )
                     else:
+                        progress("传奇装备 Words 无需改动，写入原始文件保持补丁完整")
                         upsert_zip_entry(
                             output_zip,
                             words_game_path,
@@ -2915,12 +3016,14 @@ def main(argv: list[str]) -> int:
                     )
                     unique_word_rows.extend(cleaned_rows)
                     if cleaned_rows:
+                        progress(f"清理旧传奇装备价格标记 ({len(cleaned_rows)} 条)")
                         upsert_zip_entry(
                             output_zip,
                             words_game_path,
                             patched_words.read_bytes(),
                         )
                     else:
+                        progress("传奇装备 Words 无需清理，写入原始文件保持补丁完整")
                         upsert_zip_entry(
                             output_zip,
                             words_game_path,
@@ -2932,6 +3035,7 @@ def main(argv: list[str]) -> int:
                     "--words-game-path is required when patching unique Words prices"
                 )
         elif args.tc_words.exists() and words_game_path:
+            progress("清理未启用的传奇装备价格标记")
             patched_words = args.patched_words or (args.out_dir / "words.patched.datc64")
             try:
                 cleaned_rows = clean_word_price_labels_file(args.tc_words, patched_words)
@@ -2943,12 +3047,14 @@ def main(argv: list[str]) -> int:
                 cleaned_rows = []
             unique_word_rows.extend(cleaned_rows)
             if cleaned_rows:
+                progress(f"写入清理后的 Words 文件 ({len(cleaned_rows)} 条)")
                 upsert_zip_entry(
                     output_zip,
                     words_game_path,
                     patched_words.read_bytes(),
                 )
             else:
+                progress("Words 文件无需清理，写入原始文件保持补丁完整")
                 upsert_zip_entry(output_zip, words_game_path, args.tc_words.read_bytes())
                 summary["unique_words_clean_passthrough"] = True
             if patch_unique_words and not args.no_uniques:
@@ -2994,6 +3100,7 @@ def main(argv: list[str]) -> int:
     summary["fallback_unique_words_patched"] = fallback_unique_words_patched
     summary["unique_price_label_mode"] = args.unique_price_label_mode
     summary["missing_unique_word_prices"] = len(unique_word_missing)
+    progress("写出构建报告")
     (args.out_dir / "summary.json").write_text(
         json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
     )
