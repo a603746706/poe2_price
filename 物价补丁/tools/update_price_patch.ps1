@@ -25,7 +25,7 @@ else {
 $PublicToolsRoot = Join-Path $RepoRoot "tools"
 Set-Location -LiteralPath $RepoRoot
 $script:PatchScopeDialogSelection = $null
-$script:PatchVersion = "v0.4.7"
+$script:PatchVersion = "v0.4.8"
 $script:PatchWindowTitle = "POE2 Price Patch $script:PatchVersion"
 
 if ([string]::IsNullOrWhiteSpace($Poe2Dir)) {
@@ -71,7 +71,7 @@ function Show-PatchScopeDialog {
     $Form.ClientSize = New-Object System.Drawing.Size(610, 340)
 
     $Title = New-Object System.Windows.Forms.Label
-    $Title.Text = (New-Utf16Text @(0x9009, 0x62E9, 0x672C, 0x6B21, 0x8981, 0x5199, 0x5165, 0x7684, 0x8865, 0x4E01, 0x5185, 0x5BB9)) + " $script:PatchVersion"
+    $Title.Text = (New-Utf16Text @(0x9009, 0x62E9, 0x672C, 0x6B21, 0x8981, 0x5199, 0x5165, 0x7684, 0x8865, 0x4E01, 0x5185, 0x5BB9))
     $Title.AutoSize = $true
     $Title.Location = New-Object System.Drawing.Point(24, 22)
     $Title.Font = New-Object System.Drawing.Font($Form.Font.FontFamily, 11, [System.Drawing.FontStyle]::Bold)
